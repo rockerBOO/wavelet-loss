@@ -3,10 +3,15 @@ name = "wavelet-loss"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "pywavelets>=1.8.0",
     "torch>=2.7.1",
+]
+
+[project.optional-dependencies]
+visualize = [
+    "matplotlib>=3.10.3",
 ]
 
 [build-system]
@@ -18,6 +23,8 @@ packages = ["src/wavelet_loss", "src/wavelet_transform"]
 
 [dependency-groups]
 dev = [
+    "coverage>=7.9.2",
     "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
     "ruff>=0.12.3",
 ]

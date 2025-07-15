@@ -3,12 +3,15 @@ import torch
 import torch.nn.functional as F
 import pywt
 
+
 class WaveletTransform:
     """Base class for wavelet transforms."""
 
     def __init__(self, wavelet="db4", device=torch.device("cpu")):
         """Initialize wavelet filters."""
-        assert pywt.Wavelet is not None, "PyWavelets module not available. Please install `pip install PyWavelets`"
+        assert pywt.Wavelet is not None, (
+            "PyWavelets module not available. Please install `pip install PyWavelets`"
+        )
 
         # Create filters from wavelet
         wav = pywt.Wavelet(wavelet)
@@ -17,7 +20,9 @@ class WaveletTransform:
 
     def decompose(self, x: Tensor) -> dict[str, list[Tensor]]:
         """Abstract method to be implemented by subclasses."""
-        raise NotImplementedError("WaveletTransform subclasses must implement decompose method")
+        raise NotImplementedError(
+            "WaveletTransform subclasses must implement decompose method"
+        )
 
 
 class DiscreteWaveletTransform(WaveletTransform):
@@ -138,8 +143,14 @@ class StationaryWaveletTransform(WaveletTransform):
         zeros = 2**level - 1
 
         # Create upsampled filters
-        upsampled_dec_lo = torch.zeros(len(self.orig_dec_lo) + (len(self.orig_dec_lo) - 1) * zeros, device=self.orig_dec_lo.device)
-        upsampled_dec_hi = torch.zeros(len(self.orig_dec_hi) + (len(self.orig_dec_hi) - 1) * zeros, device=self.orig_dec_hi.device)
+        upsampled_dec_lo = torch.zeros(
+            len(self.orig_dec_lo) + (len(self.orig_dec_lo) - 1) * zeros,
+            device=self.orig_dec_lo.device,
+        )
+        upsampled_dec_hi = torch.zeros(
+            len(self.orig_dec_hi) + (len(self.orig_dec_hi) - 1) * zeros,
+            device=self.orig_dec_hi.device,
+        )
 
         # Insert original coefficients with zeros in between
         upsampled_dec_lo[:: zeros + 1] = self.orig_dec_lo
@@ -147,7 +158,9 @@ class StationaryWaveletTransform(WaveletTransform):
 
         return upsampled_dec_lo, upsampled_dec_hi
 
-    def _swt_single_level(self, x: Tensor, dec_lo: Tensor, dec_hi: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def _swt_single_level(
+        self, x: Tensor, dec_lo: Tensor, dec_hi: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Perform single-level SWT decomposition with 1D convolutions."""
         batch, channels, height, width = x.shape
 
@@ -192,10 +205,18 @@ class StationaryWaveletTransform(WaveletTransform):
                 x_hi_cols_padded = F.pad(x_hi_cols, (pad_len, 0), mode="circular")
 
                 # Apply filters to columns
-                ll[b, c] = F.conv1d(x_lo_cols_padded, dec_lo_1d).squeeze(1)  # [height, width]
-                lh[b, c] = F.conv1d(x_lo_cols_padded, dec_hi_1d).squeeze(1)  # [height, width]
-                hl[b, c] = F.conv1d(x_hi_cols_padded, dec_lo_1d).squeeze(1)  # [height, width]
-                hh[b, c] = F.conv1d(x_hi_cols_padded, dec_hi_1d).squeeze(1)  # [height, width]
+                ll[b, c] = F.conv1d(x_lo_cols_padded, dec_lo_1d).squeeze(
+                    1
+                )  # [height, width]
+                lh[b, c] = F.conv1d(x_lo_cols_padded, dec_hi_1d).squeeze(
+                    1
+                )  # [height, width]
+                hl[b, c] = F.conv1d(x_hi_cols_padded, dec_lo_1d).squeeze(
+                    1
+                )  # [height, width]
+                hh[b, c] = F.conv1d(x_hi_cols_padded, dec_hi_1d).squeeze(
+                    1
+                )  # [height, width]
 
         return ll, lh, hl, hh
 
@@ -296,7 +317,9 @@ class QuaternionWaveletTransform(WaveletTransform):
             pad_w_right += 1
 
         # Apply padding with possibly asymmetric padding
-        x_pad = F.pad(x_flat, (pad_w_left, pad_w_right, pad_h_left, pad_h_right), mode="reflect")
+        x_pad = F.pad(
+            x_flat, (pad_w_left, pad_w_right, pad_h_left, pad_h_right), mode="reflect"
+        )
 
         # Apply convolution
         x_hilbert = F.conv2d(x_pad, h_filter)
@@ -338,7 +361,12 @@ class QuaternionWaveletTransform(WaveletTransform):
             "r": {"ll": [], "lh": [], "hl": [], "hh": []},  # Real part
             "i": {"ll": [], "lh": [], "hl": [], "hh": []},  # Imaginary part (x-Hilbert)
             "j": {"ll": [], "lh": [], "hl": [], "hh": []},  # Imaginary part (y-Hilbert)
-            "k": {"ll": [], "lh": [], "hl": [], "hh": []},  # Imaginary part (xy-Hilbert)
+            "k": {
+                "ll": [],
+                "lh": [],
+                "hl": [],
+                "hh": [],
+            },  # Imaginary part (xy-Hilbert)
         }
 
         # Generate Hilbert transforms of the input
