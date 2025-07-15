@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "pywavelets>=1.8.0",
-    "torch>=2.7.1",
+    "torch>=2.0.0",
 ]
 
 [project.optional-dependencies]
