@@ -1,7 +1,6 @@
 import pytest
 import torch
 from torch import Tensor
-import torch.nn.functional as F
 
 from wavelet_transform import StationaryWaveletTransform
 

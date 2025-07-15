@@ -4,7 +4,6 @@ Visualize different wavelet transform decompositions for images.
 Supports DWT, SWT, and QWT transforms.
 """
 
-import os
 from pathlib import Path
 import argparse
 import numpy as np

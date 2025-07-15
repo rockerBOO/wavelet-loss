@@ -4,7 +4,6 @@ Image processing utilities for wavelet loss scripts.
 
 import hashlib
 import numpy as np
-from pathlib import Path
 
 # Optional image loading libraries
 try:

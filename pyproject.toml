@@ -13,6 +13,14 @@ dependencies = [
 visualize = [
     "matplotlib>=3.10.3",
 ]
+image = [
+    "opencv-python>=4.7.0",
+    "pillow>=10.0.0",
+]
+vae = [
+    "accelerate>=1.8.1",
+    "diffusers>=0.34.0",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -354,9 +354,9 @@ def main():
     results_path = output_dir / results_filename
     
     with open(results_path, 'w') as f:
-        f.write(f"Wavelet Loss Results\n")
-        f.write(f"==================\n\n")
-        f.write(f"Images:\n")
+        f.write("Wavelet Loss Results\n")
+        f.write("==================\n\n")
+        f.write("Images:\n")
         f.write(f"  Image 1: {args.image1} (hash: {image1_hash})\n")
         f.write(f"  Image 2: {args.image2} (hash: {image2_hash})\n\n")
         f.write(f"VAE Model: {args.vae_model}\n")
@@ -364,13 +364,13 @@ def main():
         f.write(f"Transform Type: {args.transform_type}\n")
         f.write(f"Levels: {args.level}\n")
         f.write(f"Device: {device}\n\n")
-        f.write(f"Latent Shapes:\n")
+        f.write("Latent Shapes:\n")
         f.write(f"  Latent 1: {latent1.shape}\n")
         f.write(f"  Latent 2: {latent2.shape}\n\n")
-        f.write(f"Total Losses per Level:\n")
+        f.write("Total Losses per Level:\n")
         for i, loss in enumerate(losses, 1):
             f.write(f"  Level {i}: {loss.mean().item():.6f}\n")
-        f.write(f"\nComponent Losses:\n")
+        f.write("\nComponent Losses:\n")
         for key, value in component_losses.items():
             f.write(f"  {key}: {value:.6f}\n")
         f.write(f"\nTotal Wavelet Loss: {total_loss:.6f}\n")
