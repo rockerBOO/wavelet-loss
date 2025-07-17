@@ -308,13 +308,10 @@ class WaveletLoss(nn.Module):
         """
         # # If negative it's from the end of the levels else it's the level.
         # ll_threshold = None
-        # if self.ll_level_threshold is not None:
-        #     ll_threshold = (
-        #         self.ll_level_threshold if self.ll_level_threshold > 0 else self.level + self.ll_level_threshold
-        #     )
-        if self.ll_level_threshold is not None and band == "ll" and i + 1 <= self.ll_level_threshold:
+        ll_threshold = self._calculate_effective_ll_threshold()
+        if ll_threshold is not None and band == "ll" and i + 1 <= ll_threshold:
             return (
-                torch.tensor(0.0),
+                torch.zeros_like(pred_coeffs[band][i]),
                 torch.zeros_like(pred_coeffs[band][i]),
                 torch.zeros_like(target_coeffs[band][i]),
                 {},
@@ -430,6 +427,23 @@ class WaveletLoss(nn.Module):
         target_coeffs: dict[str, list[Tensor]],
         device: torch.device,
     ) -> Tensor:
+        """
+        Calculate energy matching loss between predicted and target wavelet coefficients.
+        
+        Args:
+            batch_size: Size of the batch
+            pred_coeffs: Dictionary of predicted wavelet coefficients
+            target_coeffs: Dictionary of target wavelet coefficients  
+            device: Device to create tensors on
+            
+        Returns:
+            Energy matching loss tensor
+            
+        Notes:
+            - Uses log-scale energy ratio for stability
+            - Applies band-specific and level-specific weights
+            - Only considers high-frequency bands (lh, hl, hh)
+        """
         energy_loss = torch.zeros(batch_size, device=device)
         for band in ["lh", "hl", "hh"]:
             for i in range(1, self.level + 1):
@@ -448,6 +462,18 @@ class WaveletLoss(nn.Module):
 
     @torch.no_grad()
     def calculate_raw_energy_metrics(self, pred_stack: Tensor, target_stack: Tensor, band: str, level: int):
+        """
+        Calculate raw energy metrics for a specific band and level.
+        
+        Args:
+            pred_stack: Predicted wavelet coefficients tensor
+            target_stack: Target wavelet coefficients tensor
+            band: Wavelet band name (e.g., "lh", "hl", "hh")
+            level: Wavelet decomposition level
+            
+        Returns:
+            Dictionary containing raw energy metrics for the band/level
+        """
         metrics: dict[str, float | int] = {}
         metrics[f"{band}{level}_raw_pred_energy"] = torch.mean(pred_stack**2).detach().item()
         metrics[f"{band}{level}_raw_target_energy"] = torch.mean(target_stack**2).detach().item()
@@ -462,7 +488,21 @@ class WaveletLoss(nn.Module):
         pred_coeffs: dict[str, list[Tensor]],
         target_coeffs: dict[str, list[Tensor]],
     ) -> dict:
-        """Calculate metrics for cross-scale consistency"""
+        """
+        Calculate metrics for cross-scale consistency between adjacent wavelet levels.
+        
+        Args:
+            pred_coeffs: Dictionary of predicted wavelet coefficients
+            target_coeffs: Dictionary of target wavelet coefficients
+            
+        Returns:
+            Dictionary containing cross-scale consistency metrics
+            
+        Notes:
+            - Compares energy ratios between adjacent scales
+            - Uses log-scale differences for stability
+            - Provides per-level and averaged metrics
+        """
         metrics = {}
 
         for band in ["lh", "hl", "hh"]:
@@ -497,7 +537,21 @@ class WaveletLoss(nn.Module):
         pred_coeffs: dict[str, list[Tensor]],
         target_coeffs: dict[str, list[Tensor]],
     ) -> dict:
-        """Calculate correlation metrics between prediction and target wavelet coefficients"""
+        """
+        Calculate spatial correlation metrics between predicted and target wavelet coefficients.
+        
+        Args:
+            pred_coeffs: Dictionary of predicted wavelet coefficients
+            target_coeffs: Dictionary of target wavelet coefficients
+            
+        Returns:
+            Dictionary containing correlation metrics for each band and level
+            
+        Notes:
+            - Calculates correlation across spatial dimensions
+            - Provides per-level and per-band averaged correlations
+            - Uses centered coefficients for accurate correlation measurement
+        """
         metrics = {}
 
         for band in ["lh", "hl", "hh"]:
@@ -533,7 +587,22 @@ class WaveletLoss(nn.Module):
         pred_coeffs: dict[str, list[Tensor]],
         target_coeffs: dict[str, list[Tensor]],
     ) -> dict:
-        """Calculate metrics for directional consistency between bands"""
+        """
+        Calculate metrics for directional consistency between wavelet bands.
+        
+        Args:
+            pred_coeffs: Dictionary of predicted wavelet coefficients
+            target_coeffs: Dictionary of target wavelet coefficients
+            
+        Returns:
+            Dictionary containing directional consistency metrics
+            
+        Notes:
+            - Analyzes horizontal vs vertical energy ratios (hl/lh)
+            - Analyzes diagonal vs horizontal+vertical energy ratios (hh/(hl+lh))
+            - Uses log-scale differences for stability
+            - Provides per-level and averaged metrics
+        """
         metrics = {}
         hv_diffs = []
         diag_diffs = []
@@ -579,7 +648,20 @@ class WaveletLoss(nn.Module):
 
     @torch.no_grad()
     def calculate_latent_regularity_metrics(self, pred_latents: Tensor) -> dict:
-        """Calculate metrics for latent space regularity"""
+        """
+        Calculate metrics for latent space regularity and smoothness.
+        
+        Args:
+            pred_latents: Predicted latent tensor
+            
+        Returns:
+            Dictionary containing latent regularity metrics
+            
+        Notes:
+            - Calculates total variation (TV) for smoothness measurement
+            - Provides statistical metrics (mean, std)
+            - Measures deviation from normal distribution (std from 1.0)
+        """
         metrics = {}
 
         # Calculate gradient magnitude of latent representation
@@ -612,7 +694,22 @@ class WaveletLoss(nn.Module):
         coeffs: dict[str, list[Tensor]],
         reference_coeffs: dict[str, list[Tensor]] | None = None,
     ) -> dict:
-        """Calculate sparsity metrics for wavelet coefficients"""
+        """
+        Calculate sparsity metrics for wavelet coefficients.
+        
+        Args:
+            coeffs: Dictionary of wavelet coefficients
+            reference_coeffs: Optional reference coefficients for relative sparsity
+            
+        Returns:
+            Dictionary containing sparsity metrics
+            
+        Notes:
+            - Uses L1 norm as primary sparsity measure
+            - Calculates non-zero ratio (threshold at 0.01)
+            - Provides relative sparsity if reference coefficients given
+            - Computes average sparsity score across all bands
+        """
         metrics = {}
         band_sparsities = []
         band_non_zero_ratios = []
@@ -645,14 +742,47 @@ class WaveletLoss(nn.Module):
         return metrics
 
     def smooth_timestep_weight(self, timestep):
-        """Smooth weight transition instead of hard cutoff"""
-
+        """
+        Calculate smooth timestep-based weight using sigmoid transition.
+        
+        Args:
+            timestep: Current diffusion timestep tensor
+            
+        Returns:
+            Smooth weight tensor with sigmoid transition instead of hard cutoff
+            
+        Notes:
+            - Weight decreases as timestep increases (later in denoising process)
+            - Uses sigmoid for smooth transition around progress=0.3
+            - Higher weights early in denoising, lower weights near completion
+        """
         progress = 1.0 - (timestep / self.max_timestep)
-
         weight = torch.sigmoid((progress - 0.3) * 10)
-
         return weight
 
+    def _calculate_effective_ll_threshold(self) -> int | None:
+        """
+        Calculate the effective LL level threshold.
+        
+        For positive values, returns the value as-is.
+        For negative values, calculates from the end: level + threshold
+        
+        Returns:
+            Effective threshold level, or None if no threshold is set
+            
+        Examples:
+            level=3, threshold=1  -> 1
+            level=3, threshold=2  -> 2
+            level=3, threshold=-1 -> 2 (3 + (-1) = 2)
+            level=3, threshold=-2 -> 1 (3 + (-2) = 1)
+        """
+        if self.ll_level_threshold is None:
+            return None
+            
+        if self.ll_level_threshold > 0:
+            return self.ll_level_threshold
+        else:
+            return self.level + self.ll_level_threshold
 
     def set_loss_fn(self, loss_fn: LossCallable):
         """

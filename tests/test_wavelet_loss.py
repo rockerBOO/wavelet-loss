@@ -172,14 +172,23 @@ class TestWaveletLoss:
 
     def test_ll_level_threshold_handling(self, setup_inputs):
         """
-        Test LL level threshold handling functionality
+        Test LL level threshold handling functionality including negative values
         """
         pred, target, device = setup_inputs
 
-        # Test with different ll_level_threshold values
-        test_thresholds = [None, 1, 2]
+        # Test with different ll_level_threshold values including negative ones
+        test_cases = [
+            # (threshold, expected_effective_threshold, description)
+            (None, None, "No threshold"),
+            (1, 1, "Positive threshold: level 1"),
+            (2, 2, "Positive threshold: level 2"),
+            (3, 3, "Positive threshold: level 3"),
+            (-1, 2, "Negative threshold: -1 from end (3-1=2)"),
+            (-2, 1, "Negative threshold: -2 from end (3-2=1)"),
+            (-3, 0, "Negative threshold: -3 from end (3-3=0)"),
+        ]
         
-        for threshold in test_thresholds:
+        for threshold, expected_effective, description in test_cases:
             loss_fn = WaveletLoss(
                 wavelet="db4",
                 level=3,
@@ -191,39 +200,147 @@ class TestWaveletLoss:
             losses, metrics = loss_fn(pred, target)
             
             # Basic functionality check
-            assert len(losses) > 0, "Should produce some losses"
+            assert len(losses) > 0, f"Should produce some losses for {description}"
             
             # If threshold is set, verify LL bands at lower levels are handled
             if threshold is not None:
                 # Check that metrics are calculated correctly
-                assert isinstance(metrics, dict), "Metrics should be a dictionary"
+                assert isinstance(metrics, dict), f"Metrics should be a dictionary for {description}"
                 
                 # Test the process_band method directly for LL bands
                 pred_coeffs = loss_fn.transform.decompose(pred, loss_fn.level)
                 target_coeffs = loss_fn.transform.decompose(target, loss_fn.level)
                 base_weight = torch.ones((pred.shape[0]), device=device)
                 
-                # Test levels within threshold
-                for i in range(min(threshold, loss_fn.level)):
-                    band_loss, pred_band, target_band, band_metrics = loss_fn.process_band(
-                        pred_coeffs, target_coeffs, "ll", i, base_weight=base_weight
-                    )
-                    
-                    # For LL bands within threshold, should return zero loss
-                    assert torch.all(band_loss == 0.0), f"LL band at level {i+1} should have zero loss"
-                    assert torch.all(pred_band == 0), f"LL pred at level {i+1} should be zero"
-                    assert torch.all(target_band == 0), f"LL target at level {i+1} should be zero"
-                    assert band_metrics == {}, f"LL band metrics at level {i+1} should be empty"
+                # Test levels within effective threshold
+                if expected_effective > 0:
+                    for i in range(min(expected_effective, loss_fn.level)):
+                        band_loss, pred_band, target_band, band_metrics = loss_fn.process_band(
+                            pred_coeffs, target_coeffs, "ll", i, base_weight=base_weight
+                        )
+                        
+                        # For LL bands within threshold, should return zero loss
+                        assert torch.all(band_loss == 0.0), f"LL band at level {i+1} should have zero loss for {description}"
+                        assert torch.all(pred_band == 0), f"LL pred at level {i+1} should be zero for {description}"
+                        assert torch.all(target_band == 0), f"LL target at level {i+1} should be zero for {description}"
+                        assert band_metrics == {}, f"LL band metrics at level {i+1} should be empty for {description}"
                 
-                # Test levels beyond threshold (if any)
-                for i in range(threshold, loss_fn.level):
+                # Test levels beyond effective threshold (if any)
+                for i in range(max(0, expected_effective), loss_fn.level):
                     band_loss, pred_band, target_band, band_metrics = loss_fn.process_band(
                         pred_coeffs, target_coeffs, "ll", i, base_weight=base_weight
                     )
                     
                     # For LL bands beyond threshold, should have normal processing
-                    assert not torch.all(band_loss == 0.0), f"LL band at level {i+1} should have non-zero loss"
-                    assert not torch.all(pred_band == 0), f"LL pred at level {i+1} should not be all zeros"
+                    assert not torch.all(band_loss == 0.0), f"LL band at level {i+1} should have non-zero loss for {description}"
+                    assert not torch.all(pred_band == 0), f"LL pred at level {i+1} should not be all zeros for {description}"
+                    
+    def test_ll_level_threshold_calculation(self, setup_inputs):
+        """
+        Test the threshold calculation logic directly
+        """
+        pred, target, device = setup_inputs
+        
+        # Test the threshold calculation for different levels
+        test_cases = [
+            # (level, threshold, expected_effective_threshold)
+            (3, 1, 1),
+            (3, 2, 2), 
+            (3, 3, 3),
+            (3, -1, 2),  # 3 + (-1) = 2
+            (3, -2, 1),  # 3 + (-2) = 1
+            (3, -3, 0),  # 3 + (-3) = 0
+            (4, -1, 3),  # 4 + (-1) = 3
+            (4, -2, 2),  # 4 + (-2) = 2
+        ]
+        
+        for level, threshold, expected in test_cases:
+            loss_fn = WaveletLoss(
+                wavelet="db4",
+                level=level,
+                transform_type="dwt",
+                device=device,
+                ll_level_threshold=threshold,
+            )
+            
+            # Calculate the effective threshold as the code does
+            if threshold > 0:
+                effective_threshold = threshold
+            else:
+                effective_threshold = level + threshold
+                
+            assert effective_threshold == expected, (
+                f"For level={level}, threshold={threshold}, expected effective threshold {expected}, "
+                f"got {effective_threshold}"
+            )
+            
+            # Test that it works in practice
+            pred_coeffs = loss_fn.transform.decompose(pred, loss_fn.level)
+            target_coeffs = loss_fn.transform.decompose(target, loss_fn.level)
+            base_weight = torch.ones((pred.shape[0]), device=device)
+            
+            # Test each level
+            for i in range(level):
+                band_loss, pred_band, target_band, band_metrics = loss_fn.process_band(
+                    pred_coeffs, target_coeffs, "ll", i, base_weight=base_weight
+                )
+                
+                if i + 1 <= effective_threshold:
+                    # Should be zero loss within threshold
+                    assert torch.all(band_loss == 0.0), (
+                        f"Level {i+1} should have zero loss with threshold {threshold} "
+                        f"(effective: {effective_threshold})"
+                    )
+                else:
+                    # Should have normal processing beyond threshold
+                    assert not torch.all(band_loss == 0.0), (
+                        f"Level {i+1} should have non-zero loss with threshold {threshold} "
+                        f"(effective: {effective_threshold})"
+                    )
+                    
+    def test_calculate_effective_ll_threshold(self, setup_inputs):
+        """
+        Test the _calculate_effective_ll_threshold method directly
+        """
+        _, _, device = setup_inputs
+        
+        # Test cases: (level, threshold, expected_effective_threshold)
+        test_cases = [
+            (3, None, None),
+            (3, 1, 1),
+            (3, 2, 2),
+            (3, 3, 3),
+            (3, -1, 2),  # 3 + (-1) = 2
+            (3, -2, 1),  # 3 + (-2) = 1
+            (3, -3, 0),  # 3 + (-3) = 0
+            (4, -1, 3),  # 4 + (-1) = 3
+            (4, -2, 2),  # 4 + (-2) = 2
+            (5, -1, 4),  # 5 + (-1) = 4
+        ]
+        
+        for level, threshold, expected in test_cases:
+            loss_fn = WaveletLoss(
+                wavelet="db4",
+                level=level,
+                transform_type="dwt",
+                device=device,
+                ll_level_threshold=threshold,
+            )
+            
+            effective_threshold = loss_fn._calculate_effective_ll_threshold()
+            
+            assert effective_threshold == expected, (
+                f"For level={level}, threshold={threshold}, expected {expected}, "
+                f"got {effective_threshold}"
+            )
+            
+            # Test edge cases
+            if threshold is not None and threshold != 0:
+                # Verify the logic is sound
+                if threshold > 0:
+                    assert effective_threshold == threshold, "Positive threshold should be unchanged"
+                else:
+                    assert effective_threshold == level + threshold, "Negative threshold should be calculated from end"
 
     def test_pad_tensors_function(self, setup_inputs):
         """
