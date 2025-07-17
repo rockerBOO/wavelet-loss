@@ -50,10 +50,28 @@ def dwt_single_level(x: Tensor, dec_lo: Tensor, dec_hi: Tensor) -> tuple[Tensor,
 
 
 class WaveletTransform:
-    """Base class for wavelet transforms."""
+    """
+    Base class for wavelet transforms.
+    
+    Provides common functionality for wavelet decomposition operations
+    including filter initialization from PyWavelets.
+    
+    Attributes:
+        dec_lo: Low-pass decomposition filter tensor
+        dec_hi: High-pass decomposition filter tensor
+    """
 
     def __init__(self, wavelet="db4", device=torch.device("cpu")):
-        """Initialize wavelet filters."""
+        """
+        Initialize wavelet filters from PyWavelets.
+        
+        Args:
+            wavelet: Wavelet name (e.g., 'db4', 'haar', 'sym4')
+            device: Device to place tensors on
+            
+        Raises:
+            AssertionError: If PyWavelets module is not available
+        """
         assert pywt.Wavelet is not None, "PyWavelets module not available. Please install `pip install PyWavelets`"
 
         # Create filters from wavelet
@@ -62,12 +80,32 @@ class WaveletTransform:
         self.dec_hi = torch.tensor(wav.dec_hi).to(device)
 
     def decompose(self, x: Tensor, level: int) -> dict[str, list[Tensor]]:
-        """Abstract method to be implemented by subclasses."""
+        """
+        Abstract method for wavelet decomposition.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            level: Number of decomposition levels
+            
+        Returns:
+            Dictionary containing decomposition coefficients
+            Format: {band: [level1, level2, ...]} where band ∈ {ll, lh, hl, hh}
+            
+        Raises:
+            NotImplementedError: Must be implemented by subclasses
+        """
         raise NotImplementedError("WaveletTransform subclasses must implement decompose method")
 
 
 class DiscreteWaveletTransform(WaveletTransform):
-    """Discrete Wavelet Transform (DWT) implementation."""
+    """
+    Discrete Wavelet Transform (DWT) implementation.
+    
+    Performs standard separable 2D DWT with downsampling at each level.
+    Each level reduces spatial dimensions by factor of 2.
+    
+    Uses PyTorch convolutions for efficient GPU computation.
+    """
 
     def decompose(self, x: Tensor, level=1) -> dict[str, list[Tensor]]:
         """
@@ -79,6 +117,11 @@ class DiscreteWaveletTransform(WaveletTransform):
 
         Returns:
             Dictionary containing decomposition coefficients
+            Format: {band: [level1, level2, ...]} where:
+            - 'll': Low-low (approximation) coefficients
+            - 'lh': Low-high (horizontal detail) coefficients  
+            - 'hl': High-low (vertical detail) coefficients
+            - 'hh': High-high (diagonal detail) coefficients
         """
         bands: dict[str, list[Tensor]] = {
             "ll": [],
@@ -101,15 +144,37 @@ class DiscreteWaveletTransform(WaveletTransform):
         return bands
 
     def _dwt_single_level(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Perform single-level DWT decomposition."""
+        """
+        Perform single-level DWT decomposition.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            
+        Returns:
+            Tuple of (ll, lh, hl, hh) decomposed tensors with half spatial dimensions
+        """
         return dwt_single_level(x, self.dec_lo, self.dec_hi)
 
 
 class StationaryWaveletTransform(WaveletTransform):
-    """Stationary Wavelet Transform (SWT) implementation."""
+    """
+    Stationary Wavelet Transform (SWT) implementation.
+    
+    Also known as redundant or undecimated wavelet transform.
+    Preserves spatial dimensions at all levels by upsampling filters
+    instead of downsampling output. Provides translation invariance.
+    
+    Uses circular convolution to avoid boundary artifacts.
+    """
 
     def __init__(self, wavelet="db4", device=torch.device("cpu")):
-        """Initialize wavelet filters."""
+        """
+        Initialize wavelet filters and store originals for upsampling.
+        
+        Args:
+            wavelet: Wavelet name (e.g., 'db4', 'haar', 'sym4')
+            device: Device to place tensors on
+        """
         super().__init__(wavelet, device)
 
         # Store original filters
@@ -117,7 +182,17 @@ class StationaryWaveletTransform(WaveletTransform):
         self.orig_dec_hi = self.dec_hi.clone()
 
     def decompose(self, x: Tensor, level=1) -> dict[str, list[Tensor]]:
-        """Perform multi-level SWT decomposition."""
+        """
+        Perform multi-level SWT decomposition.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            level: Number of decomposition levels
+            
+        Returns:
+            Dictionary containing decomposition coefficients
+            All coefficients preserve original spatial dimensions [B, C, H, W]
+        """
         bands = {
             "ll": [],
             "lh": [],
@@ -146,7 +221,19 @@ class StationaryWaveletTransform(WaveletTransform):
         return bands
 
     def _get_filters_for_level(self, level: int) -> tuple[Tensor, Tensor]:
-        """Get upsampled filters for the specified level."""
+        """
+        Get upsampled filters for the specified decomposition level.
+        
+        Args:
+            level: Decomposition level (0-indexed)
+            
+        Returns:
+            Tuple of (upsampled_dec_lo, upsampled_dec_hi) filters
+            
+        Notes:
+            - Level 0 returns original filters
+            - Higher levels insert 2^level - 1 zeros between coefficients
+        """
         if level == 0:
             return self.orig_dec_lo, self.orig_dec_hi
 
@@ -170,7 +257,22 @@ class StationaryWaveletTransform(WaveletTransform):
         return upsampled_dec_lo, upsampled_dec_hi
 
     def _swt_single_level(self, x: Tensor, dec_lo: Tensor, dec_hi: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Perform single-level SWT decomposition with 1D convolutions."""
+        """
+        Perform single-level SWT decomposition with 1D convolutions.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            dec_lo: Low-pass decomposition filter (upsampled)
+            dec_hi: High-pass decomposition filter (upsampled)
+            
+        Returns:
+            Tuple of (ll, lh, hl, hh) decomposed tensors preserving input dimensions
+            
+        Notes:
+            - Uses separable 1D convolutions for efficiency
+            - Applies circular padding to avoid boundary artifacts
+            - Processes each batch/channel combination separately
+        """
         batch, channels, height, width = x.shape
 
         # Prepare output tensors
@@ -229,14 +331,29 @@ class QuaternionWaveletTransform(WaveletTransform):
     """
 
     def __init__(self, wavelet="db4", device=torch.device("cpu")):
-        """Initialize wavelet filters and Hilbert transforms."""
+        """
+        Initialize wavelet filters and Hilbert transforms.
+        
+        Args:
+            wavelet: Wavelet name (e.g., 'db4', 'haar', 'sym4')
+            device: Device to place tensors on
+        """
         super().__init__(wavelet, device)
 
         # Register Hilbert transform filters
         self.register_hilbert_filters(device)
 
     def register_hilbert_filters(self, device):
-        """Create and register Hilbert transform filters."""
+        """
+        Create and register Hilbert transform filters for quaternion components.
+        
+        Args:
+            device: Device to place filter tensors on
+            
+        Notes:
+            - Creates filters for x, y, and xy (diagonal) directions
+            - Filters are approximations suitable for image processing
+        """
         # Create x-axis Hilbert filter
         self.hilbert_x = self._create_hilbert_filter("x").to(device)
 
@@ -247,7 +364,21 @@ class QuaternionWaveletTransform(WaveletTransform):
         self.hilbert_xy = self._create_hilbert_filter("xy").to(device)
 
     def _create_hilbert_filter(self, direction):
-        """Create a Hilbert transform filter for the specified direction."""
+        """
+        Create a Hilbert transform filter for the specified direction.
+        
+        Args:
+            direction: Filter direction ('x', 'y', or 'xy')
+            
+        Returns:
+            2D convolution filter tensor [1, 1, H, W]
+            
+        Notes:
+            - 'x': Horizontal Hilbert transform (anti-symmetric along x-axis)
+            - 'y': Vertical Hilbert transform (anti-symmetric along y-axis) 
+            - 'xy': Diagonal Hilbert transform (point reflection symmetry)
+            - Filters use approximations suitable for discrete images
+        """
         if direction == "x":
             # Horizontal Hilbert filter (approximation)
             filt = torch.tensor(
@@ -289,7 +420,21 @@ class QuaternionWaveletTransform(WaveletTransform):
             return filt.unsqueeze(0).unsqueeze(0)
 
     def _apply_hilbert(self, x, direction):
-        """Apply Hilbert transform in specified direction with correct padding."""
+        """
+        Apply Hilbert transform in specified direction with correct padding.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            direction: Transform direction ('x', 'y', or 'xy')
+            
+        Returns:
+            Hilbert-transformed tensor with same dimensions as input
+            
+        Notes:
+            - Uses reflective padding to minimize boundary artifacts
+            - Automatically handles even/odd filter sizes
+            - Crops output to match input dimensions exactly
+        """
         batch, channels, height, width = x.shape
 
         x_flat = x.reshape(batch * channels, 1, height, width)
@@ -385,6 +530,11 @@ class QuaternionWaveletTransform(WaveletTransform):
             Dictionary containing quaternion wavelet coefficients
             Format: {component: {band: [level1, level2, ...]}}
             where component ∈ {r, i, j, k} and band ∈ {ll, lh, hl, hh}
+            
+        Notes:
+            - Real component (r) uses standard DWT of input
+            - Imaginary components (i, j, k) use DWT of Hilbert transforms
+            - Provides phase information useful for texture analysis
         """
         # Generate Hilbert transforms of the input
         x_hilbert_x = self._apply_hilbert(x, "x")
@@ -402,5 +552,13 @@ class QuaternionWaveletTransform(WaveletTransform):
         return qwt_coeffs
 
     def _dwt_single_level(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Perform single-level DWT decomposition."""
+        """
+        Perform single-level DWT decomposition for quaternion component.
+        
+        Args:
+            x: Input tensor [B, C, H, W]
+            
+        Returns:
+            Tuple of (ll, lh, hl, hh) decomposed tensors with half spatial dimensions
+        """
         return dwt_single_level(x, self.dec_lo, self.dec_hi)
