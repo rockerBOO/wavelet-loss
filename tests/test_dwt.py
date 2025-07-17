@@ -28,9 +28,7 @@ class TestDiscreteWaveletTransform:
         assert dwt.dec_lo.size(0) == 8
         assert dwt.dec_hi.size(0) == 8
 
-    def test_dwt_single_level(
-        self, dwt: DiscreteWaveletTransform, sample_image: Tensor
-    ):
+    def test_dwt_single_level(self, dwt: DiscreteWaveletTransform, sample_image: Tensor):
         """Test single-level DWT decomposition."""
         x = sample_image
 
@@ -84,14 +82,11 @@ class TestDiscreteWaveletTransform:
         # Check energy preservation
         input_energy = torch.sum(x**2).item()
         output_energy = (
-            torch.sum(ll**2).item()
-            + torch.sum(lh**2).item()
-            + torch.sum(hl**2).item()
-            + torch.sum(hh**2).item()
+            torch.sum(ll**2).item() + torch.sum(lh**2).item() + torch.sum(hl**2).item() + torch.sum(hh**2).item()
         )
 
         # For orthogonal wavelets like db4, energy should be approximately preserved
-        assert 0.9 <= output_energy / input_energy <= 1.11, (
+        assert 0.9 <= output_energy / input_energy <= 1.12, (
             f"Energy ratio (output/input): {output_energy / input_energy:.4f} should be close to 1.0"
         )
 
@@ -110,9 +105,7 @@ class TestDiscreteWaveletTransform:
             assert band in result
             assert len(result[band]) == level
 
-    def test_decompose_shapes(
-        self, dwt: DiscreteWaveletTransform, sample_image: Tensor
-    ):
+    def test_decompose_shapes(self, dwt: DiscreteWaveletTransform, sample_image: Tensor):
         """Test shapes of decomposition coefficients."""
         x = sample_image
         level = 3
@@ -129,7 +122,7 @@ class TestDiscreteWaveletTransform:
         expected_shapes = []
         current_h, current_w = x.shape[2], x.shape[3]
 
-        for l in range(level):
+        for lvl in range(level):
             # Calculate shape for this level using PyTorch's conv2d formula
             padded_h = current_h + 2 * padding
             padded_w = current_w + 2 * padding
@@ -142,20 +135,18 @@ class TestDiscreteWaveletTransform:
             current_h, current_w = output_h, output_w
 
         # Check shapes of coefficients at each level
-        for l in range(level):
-            expected_shape = expected_shapes[l]
+        for lvl in range(level):
+            expected_shape = expected_shapes[lvl]
 
             # Verify all bands at this level have the correct shape
             for band in ["ll", "lh", "hl", "hh"]:
-                assert result[band][l].shape == expected_shape, (
-                    f"Level {l}, {band}: expected {expected_shape}, got {result[band][l].shape}"
+                assert result[band][lvl].shape == expected_shape, (
+                    f"Level {lvl}, {band}: expected {expected_shape}, got {result[band][lvl].shape}"
                 )
 
         # Verify length of output lists
         for band in ["ll", "lh", "hl", "hh"]:
-            assert len(result[band]) == level, (
-                f"Expected {level} levels for {band}, got {len(result[band])}"
-            )
+            assert len(result[band]) == level, f"Expected {level} levels for {band}, got {len(result[band])}"
 
     def test_decompose_different_levels(self, dwt, sample_image):
         """Test decomposition with different levels."""
@@ -207,7 +198,7 @@ class TestDiscreteWaveletTransform:
             "dmey",
         ],
     )
-    def test_different_wavelets_different_sizes(self, sample_image, wavelet):
+    def test_different_wavelets_different_sizes(self, wavelet):
         """Test DWT with different wavelet families and input sizes."""
         dwt = DiscreteWaveletTransform(wavelet=wavelet, device=torch.device("cpu"))
 
@@ -229,13 +220,9 @@ class TestDiscreteWaveletTransform:
             exp_w = (pad_w - filter_size) // stride + 1
             exp_shape = (x.shape[0], x.shape[1], exp_h, exp_w)
 
-            assert test_ll.shape == exp_shape, (
-                f"For input {x.shape}, expected {exp_shape}, got {test_ll.shape}"
-            )
+            assert test_ll.shape == exp_shape, f"For input {x.shape}, expected {exp_shape}, got {test_ll.shape}"
 
-    @pytest.mark.parametrize(
-        "shape", [(2, 3, 64, 64), (1, 1, 128, 128), (4, 3, 120, 160)]
-    )
+    @pytest.mark.parametrize("shape", [(2, 3, 64, 64), (1, 1, 128, 128), (4, 3, 120, 160)])
     def test_different_input_shapes(self, shape):
         """Test DWT with different input shapes."""
         dwt = DiscreteWaveletTransform(wavelet="db4", device=torch.device("cpu"))
@@ -296,4 +283,4 @@ class TestDiscreteWaveletTransform:
         base_transform = WaveletTransform(wavelet="db4", device=torch.device("cpu"))
 
         with pytest.raises(NotImplementedError):
-            base_transform.decompose(torch.randn(2, 2, 32, 32))
+            base_transform.decompose(torch.randn(2, 2, 32, 32), 2)

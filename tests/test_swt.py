@@ -27,9 +27,7 @@ class TestStationaryWaveletTransform:
         assert swt.dec_lo.size(0) == 8
         assert swt.dec_hi.size(0) == 8
 
-    def test_swt_single_level(
-        self, swt: StationaryWaveletTransform, sample_image: Tensor
-    ):
+    def test_swt_single_level(self, swt: StationaryWaveletTransform, sample_image: Tensor):
         """Test single-level SWT decomposition."""
         x = sample_image
 
@@ -53,9 +51,7 @@ class TestStationaryWaveletTransform:
         test_sizes = [(16, 16), (32, 32), (64, 64)]
         for h, w in test_sizes:
             test_input = torch.randn(2, 2, h, w)
-            test_ll, test_lh, test_hl, test_hh = swt._swt_single_level(
-                test_input, dec_lo, dec_hi
-            )
+            test_ll, test_lh, test_hl, test_hh = swt._swt_single_level(test_input, dec_lo, dec_hi)
 
             # Check output shape is same as input shape (no dimension change in SWT)
             assert test_ll.shape == test_input.shape
@@ -66,10 +62,7 @@ class TestStationaryWaveletTransform:
         # Check energy relationship
         input_energy = torch.sum(x**2).item()
         output_energy = (
-            torch.sum(ll**2).item()
-            + torch.sum(lh**2).item()
-            + torch.sum(hl**2).item()
-            + torch.sum(hh**2).item()
+            torch.sum(ll**2).item() + torch.sum(lh**2).item() + torch.sum(hl**2).item() + torch.sum(hh**2).item()
         )
 
         # For SWT, energy is not strictly preserved in the same way as DWT
@@ -93,9 +86,7 @@ class TestStationaryWaveletTransform:
             assert len(result["hl"]) == level
             assert len(result["hh"]) == level
 
-    def test_decompose_shapes(
-        self, swt: StationaryWaveletTransform, sample_image: Tensor
-    ):
+    def test_decompose_shapes(self, swt: StationaryWaveletTransform, sample_image: Tensor):
         """Test shapes of decomposition coefficients."""
         x = sample_image
         level = 3
@@ -190,9 +181,7 @@ class TestStationaryWaveletTransform:
             assert result["hl"][0].shape == x.shape
             assert result["hh"][0].shape == x.shape
 
-    @pytest.mark.parametrize(
-        "shape", [(2, 3, 64, 64), (1, 1, 128, 128), (4, 3, 120, 160)]
-    )
+    @pytest.mark.parametrize("shape", [(2, 3, 64, 64), (1, 1, 128, 128), (4, 3, 120, 160)])
     def test_different_input_shapes(self, shape):
         """Test SWT with different input shapes."""
         swt = StationaryWaveletTransform(wavelet="db4", device=torch.device("cpu"))

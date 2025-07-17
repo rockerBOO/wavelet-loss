@@ -22,10 +22,7 @@ def explore_wavelets(coeffs, coeffs_name="Coefficients"):
             sparsity = (torch.abs(coeffs[band][level]) < 0.01).float().mean().item()
             magnitude = torch.abs(coeffs[band][level]).mean().item()
 
-            print(
-                f"{band.upper()}{level + 1}: shape={shape}, "
-                f"sparsity={sparsity:.1%}, avg_magnitude={magnitude:.4f}"
-            )
+            print(f"{band.upper()}{level + 1}: shape={shape}, sparsity={sparsity:.1%}, avg_magnitude={magnitude:.4f}")
 
 
 # During training, visualize specific coefficients
@@ -66,9 +63,7 @@ def visualize_training_wavelets(pred_coeffs, target_coeffs, step):
     plt.close(fig3)
 
 
-def visualize_all_bands_levels(
-    coeffs, title_prefix="", batch_idx=0, channel_idx=0, save_path=None
-):
+def visualize_all_bands_levels(coeffs, title_prefix="", batch_idx=0, channel_idx=0, save_path=None):
     """
     Show all wavelet bands and levels in one overview plot
     """
@@ -76,9 +71,7 @@ def visualize_all_bands_levels(
     bands = ["lh", "hl", "hh"]
     n_levels = len(coeffs["lh"])  # Assuming all bands have same levels
 
-    fig, axes = plt.subplots(
-        len(bands), n_levels, figsize=(4 * n_levels, 3 * len(bands))
-    )
+    fig, axes = plt.subplots(len(bands), n_levels, figsize=(4 * n_levels, 3 * len(bands)))
 
     if n_levels == 1:
         axes = axes.reshape(-1, 1)
@@ -88,9 +81,7 @@ def visualize_all_bands_levels(
             ax = axes[band_idx, level]
 
             # Get coefficient data
-            coeff_data = (
-                coeffs[band][level][batch_idx, channel_idx].detach().cpu().numpy()
-            )
+            coeff_data = coeffs[band][level][batch_idx, channel_idx].detach().cpu().numpy()
 
             # Plot
             im = ax.imshow(coeff_data, cmap="RdBu_r", aspect="auto")
@@ -123,9 +114,7 @@ def visualize_all_bands_levels(
     return fig
 
 
-def compare_wavelet_coefficients(
-    pred_coeffs, target_coeffs, band, level, batch_idx=0, channel_idx=0, save_path=None
-):
+def compare_wavelet_coefficients(pred_coeffs, target_coeffs, band, level, batch_idx=0, channel_idx=0, save_path=None):
     """
     Side-by-side comparison of predicted vs target coefficients
     """
@@ -134,9 +123,7 @@ def compare_wavelet_coefficients(
 
     # Get data
     pred_data = pred_coeffs[band][level][batch_idx, channel_idx].detach().cpu().numpy()
-    target_data = (
-        target_coeffs[band][level][batch_idx, channel_idx].detach().cpu().numpy()
-    )
+    target_data = target_coeffs[band][level][batch_idx, channel_idx].detach().cpu().numpy()
 
     # Calculate difference
     diff_data = pred_data - target_data
@@ -298,9 +285,7 @@ def visualize_wavelet_coefficients(
     return fig
 
 
-def visualize_qwt_results(
-    qwt_transform, lr_image, pred_latent, target_latent, filename
-):
+def visualize_qwt_results(qwt_transform, lr_image, pred_latent, target_latent, filename):
     """
     Visualize QWT decomposition of input, prediction, and target.
 
@@ -356,9 +341,7 @@ def visualize_qwt_results(
             # Normalize for visualization
             lr_ll = (lr_ll - lr_ll.min()) / (lr_ll.max() - lr_ll.min() + 1e-8)
             pred_ll = (pred_ll - pred_ll.min()) / (pred_ll.max() - pred_ll.min() + 1e-8)
-            target_ll = (target_ll - target_ll.min()) / (
-                target_ll.max() - target_ll.min() + 1e-8
-            )
+            target_ll = (target_ll - target_ll.min()) / (target_ll.max() - target_ll.min() + 1e-8)
 
             axes[0, col].imshow(lr_ll, cmap="viridis")
             axes[0, col].set_title(f"LR {component}_LL")
@@ -383,12 +366,8 @@ def visualize_qwt_results(
 
             # Normalize for visualization
             lr_band = (lr_band - lr_band.min()) / (lr_band.max() - lr_band.min() + 1e-8)
-            pred_band = (pred_band - pred_band.min()) / (
-                pred_band.max() - pred_band.min() + 1e-8
-            )
-            target_band = (target_band - target_band.min()) / (
-                target_band.max() - target_band.min() + 1e-8
-            )
+            pred_band = (pred_band - pred_band.min()) / (pred_band.max() - pred_band.min() + 1e-8)
+            target_band = (target_band - target_band.min()) / (target_band.max() - target_band.min() + 1e-8)
 
             # Plot in the corresponding row
             row = i + 1 if i > 0 else i + 1 + band_idx

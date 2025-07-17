@@ -4,25 +4,66 @@ import torch.nn.functional as F
 import pywt
 
 
+def dwt_single_level(x: Tensor, dec_lo: Tensor, dec_hi: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """
+    Perform single-level DWT decomposition.
+
+    Args:
+        x: Input tensor [B, C, H, W]
+        dec_lo: Low-pass decomposition filter
+        dec_hi: High-pass decomposition filter
+
+    Returns:
+        Tuple of (ll, lh, hl, hh) decomposed tensors
+    """
+    batch, channels, height, width = x.shape
+    x = x.view(batch * channels, 1, height, width)
+
+    # Calculate proper padding for the filter size
+    filter_size = dec_lo.size(0)
+    pad_size = filter_size // 2
+
+    # Pad for proper convolution
+    try:
+        x_pad = F.pad(x, (pad_size,) * 4, mode="reflect")
+    except RuntimeError:
+        # Fallback for very small tensors
+        x_pad = F.pad(x, (pad_size,) * 4, mode="constant")
+
+    # Apply filter to rows
+    lo = F.conv2d(x_pad, dec_lo.view(1, 1, -1, 1), stride=(2, 1))
+    hi = F.conv2d(x_pad, dec_hi.view(1, 1, -1, 1), stride=(2, 1))
+
+    # Apply filter to columns
+    ll = F.conv2d(lo, dec_lo.view(1, 1, 1, -1), stride=(1, 2))
+    lh = F.conv2d(lo, dec_hi.view(1, 1, 1, -1), stride=(1, 2))
+    hl = F.conv2d(hi, dec_lo.view(1, 1, 1, -1), stride=(1, 2))
+    hh = F.conv2d(hi, dec_hi.view(1, 1, 1, -1), stride=(1, 2))
+
+    # Reshape back to batch format
+    ll = ll.view(batch, channels, ll.shape[2], ll.shape[3]).to(x.device)
+    lh = lh.view(batch, channels, lh.shape[2], lh.shape[3]).to(x.device)
+    hl = hl.view(batch, channels, hl.shape[2], hl.shape[3]).to(x.device)
+    hh = hh.view(batch, channels, hh.shape[2], hh.shape[3]).to(x.device)
+
+    return ll, lh, hl, hh
+
+
 class WaveletTransform:
     """Base class for wavelet transforms."""
 
     def __init__(self, wavelet="db4", device=torch.device("cpu")):
         """Initialize wavelet filters."""
-        assert pywt.Wavelet is not None, (
-            "PyWavelets module not available. Please install `pip install PyWavelets`"
-        )
+        assert pywt.Wavelet is not None, "PyWavelets module not available. Please install `pip install PyWavelets`"
 
         # Create filters from wavelet
         wav = pywt.Wavelet(wavelet)
         self.dec_lo = torch.tensor(wav.dec_lo).to(device)
         self.dec_hi = torch.tensor(wav.dec_hi).to(device)
 
-    def decompose(self, x: Tensor) -> dict[str, list[Tensor]]:
+    def decompose(self, x: Tensor, level: int) -> dict[str, list[Tensor]]:
         """Abstract method to be implemented by subclasses."""
-        raise NotImplementedError(
-            "WaveletTransform subclasses must implement decompose method"
-        )
+        raise NotImplementedError("WaveletTransform subclasses must implement decompose method")
 
 
 class DiscreteWaveletTransform(WaveletTransform):
@@ -61,37 +102,7 @@ class DiscreteWaveletTransform(WaveletTransform):
 
     def _dwt_single_level(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Perform single-level DWT decomposition."""
-        batch, channels, height, width = x.shape
-        x = x.view(batch * channels, 1, height, width)
-
-        # Calculate proper padding for the filter size
-        filter_size = self.dec_lo.size(0)
-        pad_size = filter_size // 2
-
-        # Pad for proper convolution
-        try:
-            x_pad = F.pad(x, (pad_size,) * 4, mode="reflect")
-        except RuntimeError:
-            # Fallback for very small tensors
-            x_pad = F.pad(x, (pad_size,) * 4, mode="constant")
-
-        # Apply filter to rows
-        lo = F.conv2d(x_pad, self.dec_lo.view(1, 1, -1, 1), stride=(2, 1))
-        hi = F.conv2d(x_pad, self.dec_hi.view(1, 1, -1, 1), stride=(2, 1))
-
-        # Apply filter to columns
-        ll = F.conv2d(lo, self.dec_lo.view(1, 1, 1, -1), stride=(1, 2))
-        lh = F.conv2d(lo, self.dec_hi.view(1, 1, 1, -1), stride=(1, 2))
-        hl = F.conv2d(hi, self.dec_lo.view(1, 1, 1, -1), stride=(1, 2))
-        hh = F.conv2d(hi, self.dec_hi.view(1, 1, 1, -1), stride=(1, 2))
-
-        # Reshape back to batch format
-        ll = ll.view(batch, channels, ll.shape[2], ll.shape[3]).to(x.device)
-        lh = lh.view(batch, channels, lh.shape[2], lh.shape[3]).to(x.device)
-        hl = hl.view(batch, channels, hl.shape[2], hl.shape[3]).to(x.device)
-        hh = hh.view(batch, channels, hh.shape[2], hh.shape[3]).to(x.device)
-
-        return ll, lh, hl, hh
+        return dwt_single_level(x, self.dec_lo, self.dec_hi)
 
 
 class StationaryWaveletTransform(WaveletTransform):
@@ -108,10 +119,10 @@ class StationaryWaveletTransform(WaveletTransform):
     def decompose(self, x: Tensor, level=1) -> dict[str, list[Tensor]]:
         """Perform multi-level SWT decomposition."""
         bands = {
-            "ll": [],  # or "aa" if you prefer PyWavelets nomenclature
-            "lh": [],  # or "da"
-            "hl": [],  # or "ad"
-            "hh": [],  # or "dd"
+            "ll": [],
+            "lh": [],
+            "hl": [],
+            "hh": [],
         }
 
         # Start with input as low frequency
@@ -158,9 +169,7 @@ class StationaryWaveletTransform(WaveletTransform):
 
         return upsampled_dec_lo, upsampled_dec_hi
 
-    def _swt_single_level(
-        self, x: Tensor, dec_lo: Tensor, dec_hi: Tensor
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def _swt_single_level(self, x: Tensor, dec_lo: Tensor, dec_hi: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Perform single-level SWT decomposition with 1D convolutions."""
         batch, channels, height, width = x.shape
 
@@ -205,18 +214,10 @@ class StationaryWaveletTransform(WaveletTransform):
                 x_hi_cols_padded = F.pad(x_hi_cols, (pad_len, 0), mode="circular")
 
                 # Apply filters to columns
-                ll[b, c] = F.conv1d(x_lo_cols_padded, dec_lo_1d).squeeze(
-                    1
-                )  # [height, width]
-                lh[b, c] = F.conv1d(x_lo_cols_padded, dec_hi_1d).squeeze(
-                    1
-                )  # [height, width]
-                hl[b, c] = F.conv1d(x_hi_cols_padded, dec_lo_1d).squeeze(
-                    1
-                )  # [height, width]
-                hh[b, c] = F.conv1d(x_hi_cols_padded, dec_hi_1d).squeeze(
-                    1
-                )  # [height, width]
+                ll[b, c] = F.conv1d(x_lo_cols_padded, dec_lo_1d).squeeze(1)  # [height, width]
+                lh[b, c] = F.conv1d(x_lo_cols_padded, dec_hi_1d).squeeze(1)  # [height, width]
+                hl[b, c] = F.conv1d(x_hi_cols_padded, dec_lo_1d).squeeze(1)  # [height, width]
+                hh[b, c] = F.conv1d(x_hi_cols_padded, dec_hi_1d).squeeze(1)  # [height, width]
 
         return ll, lh, hl, hh
 
@@ -317,9 +318,7 @@ class QuaternionWaveletTransform(WaveletTransform):
             pad_w_right += 1
 
         # Apply padding with possibly asymmetric padding
-        x_pad = F.pad(
-            x_flat, (pad_w_left, pad_w_right, pad_h_left, pad_h_right), mode="reflect"
-        )
+        x_pad = F.pad(x_flat, (pad_w_left, pad_w_right, pad_h_left, pad_h_right), mode="reflect")
 
         # Apply convolution
         x_hilbert = F.conv2d(x_pad, h_filter)
@@ -343,9 +342,40 @@ class QuaternionWaveletTransform(WaveletTransform):
         # Reshape back to original format
         return x_hilbert.reshape(batch, channels, height, width)
 
-    def decompose(self, x: Tensor, level=1) -> dict[str, dict[str, list[Tensor]]]:
+    def decompose(self, x: Tensor, level=1) -> dict[str, list[Tensor]]:
         """
-        Perform multi-level QWT decomposition.
+        Perform multi-level wavelet decomposition on a single tensor.
+
+        Args:
+            x: Input tensor [B, C, H, W]
+            level: Number of decomposition levels
+
+        Returns:
+            Dictionary containing wavelet coefficients
+            Format: {band: [level1, level2, ...]}
+            where band ∈ {ll, lh, hl, hh}
+        """
+        # Initialize result dictionary
+        coeffs = {"ll": [], "lh": [], "hl": [], "hh": []}
+
+        # Initialize with input
+        ll = x
+
+        # Perform wavelet decomposition for each level
+        for i in range(level):
+            ll, lh, hl, hh = self._dwt_single_level(ll)
+
+            # Store coefficients for this level
+            coeffs["ll"].append(ll)
+            coeffs["lh"].append(lh)
+            coeffs["hl"].append(hl)
+            coeffs["hh"].append(hh)
+
+        return coeffs
+
+    def decompose_quaternion(self, x: Tensor, level=1) -> dict[str, dict[str, list[Tensor]]]:
+        """
+        Perform multi-level QWT decomposition with quaternion components.
 
         Args:
             x: Input tensor [B, C, H, W]
@@ -356,100 +386,21 @@ class QuaternionWaveletTransform(WaveletTransform):
             Format: {component: {band: [level1, level2, ...]}}
             where component ∈ {r, i, j, k} and band ∈ {ll, lh, hl, hh}
         """
-        # Initialize result dictionary with quaternion components
-        qwt_coeffs = {
-            "r": {"ll": [], "lh": [], "hl": [], "hh": []},  # Real part
-            "i": {"ll": [], "lh": [], "hl": [], "hh": []},  # Imaginary part (x-Hilbert)
-            "j": {"ll": [], "lh": [], "hl": [], "hh": []},  # Imaginary part (y-Hilbert)
-            "k": {
-                "ll": [],
-                "lh": [],
-                "hl": [],
-                "hh": [],
-            },  # Imaginary part (xy-Hilbert)
-        }
-
         # Generate Hilbert transforms of the input
         x_hilbert_x = self._apply_hilbert(x, "x")
         x_hilbert_y = self._apply_hilbert(x, "y")
         x_hilbert_xy = self._apply_hilbert(x, "xy")
 
-        # Initialize with original signals
-        ll_r = x
-        ll_i = x_hilbert_x
-        ll_j = x_hilbert_y
-        ll_k = x_hilbert_xy
-
-        # Perform wavelet decomposition for each level
-        for i in range(level):
-            # Real part decomposition
-            ll_r, lh_r, hl_r, hh_r = self._dwt_single_level(ll_r)
-
-            # x-Hilbert part decomposition
-            ll_i, lh_i, hl_i, hh_i = self._dwt_single_level(ll_i)
-
-            # y-Hilbert part decomposition
-            ll_j, lh_j, hl_j, hh_j = self._dwt_single_level(ll_j)
-
-            # xy-Hilbert part decomposition
-            ll_k, lh_k, hl_k, hh_k = self._dwt_single_level(ll_k)
-
-            # Store results for real part
-            qwt_coeffs["r"]["ll"].append(ll_r)
-            qwt_coeffs["r"]["lh"].append(lh_r)
-            qwt_coeffs["r"]["hl"].append(hl_r)
-            qwt_coeffs["r"]["hh"].append(hh_r)
-
-            # Store results for x-Hilbert part
-            qwt_coeffs["i"]["ll"].append(ll_i)
-            qwt_coeffs["i"]["lh"].append(lh_i)
-            qwt_coeffs["i"]["hl"].append(hl_i)
-            qwt_coeffs["i"]["hh"].append(hh_i)
-
-            # Store results for y-Hilbert part
-            qwt_coeffs["j"]["ll"].append(ll_j)
-            qwt_coeffs["j"]["lh"].append(lh_j)
-            qwt_coeffs["j"]["hl"].append(hl_j)
-            qwt_coeffs["j"]["hh"].append(hh_j)
-
-            # Store results for xy-Hilbert part
-            qwt_coeffs["k"]["ll"].append(ll_k)
-            qwt_coeffs["k"]["lh"].append(lh_k)
-            qwt_coeffs["k"]["hl"].append(hl_k)
-            qwt_coeffs["k"]["hh"].append(hh_k)
+        # Perform decomposition for each quaternion component
+        qwt_coeffs = {
+            "r": self.decompose(x, level),  # Real part
+            "i": self.decompose(x_hilbert_x, level),  # Imaginary part (x-Hilbert)
+            "j": self.decompose(x_hilbert_y, level),  # Imaginary part (y-Hilbert)
+            "k": self.decompose(x_hilbert_xy, level),  # Imaginary part (xy-Hilbert)
+        }
 
         return qwt_coeffs
 
     def _dwt_single_level(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Perform single-level DWT decomposition."""
-        batch, channels, height, width = x.shape
-        x = x.view(batch * channels, 1, height, width)
-
-        # Calculate proper padding for the filter size
-        filter_size = self.dec_lo.size(0)
-        pad_size = filter_size // 2
-
-        # Pad for proper convolution
-        try:
-            x_pad = F.pad(x, (pad_size,) * 4, mode="reflect")
-        except RuntimeError:
-            # Fallback for very small tensors
-            x_pad = F.pad(x, (pad_size,) * 4, mode="constant")
-
-        # Apply filter to rows
-        lo = F.conv2d(x_pad, self.dec_lo.view(1, 1, -1, 1), stride=(2, 1))
-        hi = F.conv2d(x_pad, self.dec_hi.view(1, 1, -1, 1), stride=(2, 1))
-
-        # Apply filter to columns
-        ll = F.conv2d(lo, self.dec_lo.view(1, 1, 1, -1), stride=(1, 2))
-        lh = F.conv2d(lo, self.dec_hi.view(1, 1, 1, -1), stride=(1, 2))
-        hl = F.conv2d(hi, self.dec_lo.view(1, 1, 1, -1), stride=(1, 2))
-        hh = F.conv2d(hi, self.dec_hi.view(1, 1, 1, -1), stride=(1, 2))
-
-        # Reshape back to batch format
-        ll = ll.view(batch, channels, ll.shape[2], ll.shape[3]).to(x.device)
-        lh = lh.view(batch, channels, lh.shape[2], lh.shape[3]).to(x.device)
-        hl = hl.view(batch, channels, hl.shape[2], hl.shape[3]).to(x.device)
-        hh = hh.view(batch, channels, hh.shape[2], hh.shape[3]).to(x.device)
-
-        return ll, lh, hl, hh
+        return dwt_single_level(x, self.dec_lo, self.dec_hi)

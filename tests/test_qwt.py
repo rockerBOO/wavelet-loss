@@ -80,9 +80,9 @@ class TestQuaternionWaveletTransform:
             for j in range(7):
                 # Skip the zero middle row and column
                 if i != 3 and j != 3:
-                    assert torch.allclose(
-                        filter_data[i, j], filter_data[6 - i, 6 - j]
-                    ), f"Point reflection failed at [{i},{j}] vs [{6 - i},{6 - j}]"
+                    assert torch.allclose(filter_data[i, j], filter_data[6 - i, 6 - j]), (
+                        f"Point reflection failed at [{i},{j}] vs [{6 - i},{6 - j}]"
+                    )
 
     def test_apply_hilbert_shape_preservation(self, qwt, sample_image):
         """Test that Hilbert transforms preserve input shape."""
@@ -98,9 +98,7 @@ class TestQuaternionWaveletTransform:
         assert x_hilbert_y.shape == x.shape
         assert x_hilbert_xy.shape == x.shape
 
-    def test_dwt_single_level(
-        self, qwt: QuaternionWaveletTransform, sample_image: Tensor
-    ):
+    def test_dwt_single_level(self, qwt: QuaternionWaveletTransform, sample_image: Tensor):
         """Test single-level DWT decomposition."""
         x = sample_image
 
@@ -166,13 +164,13 @@ class TestQuaternionWaveletTransform:
         #     f"Energy ratio (output/input): {output_energy / input_energy:.4f} should be close to 1.0"
         # )
 
-    def test_decompose_structure(self, qwt, sample_image):
+    def test_decompose_structure(self, qwt: QuaternionWaveletTransform, sample_image: Tensor):
         """Test structure of decomposition result."""
         x = sample_image
         level = 2
 
         # Perform decomposition
-        result = qwt.decompose(x, level=level)
+        result = qwt.decompose_quaternion(x, level=level)
 
         # Check structure of result
         components = ["r", "i", "j", "k"]
@@ -184,15 +182,13 @@ class TestQuaternionWaveletTransform:
                 assert band in result[component]
                 assert len(result[component][band]) == level
 
-    def test_decompose_shapes(
-        self, qwt: QuaternionWaveletTransform, sample_image: Tensor
-    ):
+    def test_decompose_shapes(self, qwt: QuaternionWaveletTransform, sample_image: Tensor):
         """Test shapes of decomposition coefficients."""
         x = sample_image
         level = 3
 
         # Perform decomposition
-        result = qwt.decompose(x, level=level)
+        result = qwt.decompose_quaternion(x, level=level)
 
         # Filter size and padding
         filter_size = qwt.dec_lo.size(0)  # 8 for db4
@@ -203,7 +199,7 @@ class TestQuaternionWaveletTransform:
         expected_shapes = []
         current_h, current_w = x.shape[2], x.shape[3]
 
-        for l in range(level):
+        for level_idx in range(level):
             # Calculate shape for this level using PyTorch's conv2d formula
             padded_h = current_h + 2 * padding
             padded_w = current_w + 2 * padding
@@ -216,14 +212,14 @@ class TestQuaternionWaveletTransform:
             current_h, current_w = output_h, output_w
 
         # Check shapes of coefficients at each level
-        for l in range(level):
-            expected_shape = expected_shapes[l]
+        for level_idx in range(level):
+            expected_shape = expected_shapes[level_idx]
 
             # Verify all components and bands at this level have the correct shape
             for component in ["r", "i", "j", "k"]:
                 for band in ["ll", "lh", "hl", "hh"]:
-                    assert result[component][band][l].shape == expected_shape, (
-                        f"Level {l}, {component}/{band}: expected {expected_shape}, got {result[component][band][l].shape}"
+                    assert result[component][band][level_idx].shape == expected_shape, (
+                        f"Level {level_idx}, {component}/{band}: expected {expected_shape}, got {result[component][band][level_idx].shape}"
                     )
 
         # Verify length of output lists
@@ -233,13 +229,13 @@ class TestQuaternionWaveletTransform:
                     f"Expected {level} levels for {component}/{band}, got {len(result[component][band])}"
                 )
 
-    def test_decompose_different_levels(self, qwt, sample_image):
+    def test_decompose_different_levels(self, qwt: QuaternionWaveletTransform, sample_image: Tensor):
         """Test decomposition with different levels."""
         x = sample_image
 
         # Test with different levels
         for level in [1, 2, 3]:
-            result = qwt.decompose(x, level=level)
+            result = qwt.decompose_quaternion(x, level=level)
 
             # Check number of coefficients at each level
             for component in ["r", "i", "j", "k"]:
@@ -265,7 +261,7 @@ class TestQuaternionWaveletTransform:
         qwt = QuaternionWaveletTransform(wavelet=wavelet, device=torch.device("cpu"))
 
         # Simple test that decomposition works with this wavelet
-        result = qwt.decompose(sample_image, level=1)
+        result = qwt.decompose_quaternion(sample_image, level=1)
 
         # Basic structure check
         assert all(component in result for component in ["r", "i", "j", "k"])
@@ -290,7 +286,7 @@ class TestQuaternionWaveletTransform:
         qwt = QuaternionWaveletTransform(wavelet=wavelet, device=torch.device("cpu"))
 
         # Simple test that decomposition works with this wavelet
-        result = qwt.decompose(sample_image, level=1)
+        qwt.decompose_quaternion(sample_image, level=1)
 
         # Test with different input sizes to verify consistency
         test_sizes = [(8, 8), (32, 32), (64, 64)]
@@ -303,18 +299,10 @@ class TestQuaternionWaveletTransform:
             padding = filter_size // 2  # 4 for db4
             stride = 2  # Downsampling factor
 
-            # For each dimension
-            padded_height = x.shape[2] + 2 * padding
-            padded_width = x.shape[3] + 2 * padding
-
             # Filter size and padding
             filter_size = qwt.dec_lo.size(0)  # 8 for db4
             padding = filter_size // 2  # 4 for db4
             stride = 2  # Downsampling factor
-
-            # Calculate expected shapes at each level
-            expected_shapes = []
-            current_h, current_w = x.shape[2], x.shape[3]
 
             # Calculate expected shape
             pad_h = x.shape[2] + 2 * padding
@@ -323,20 +311,16 @@ class TestQuaternionWaveletTransform:
             exp_w = (pad_w - filter_size) // stride + 1
             exp_shape = (x.shape[0], x.shape[1], exp_h, exp_w)
 
-            assert test_ll.shape == exp_shape, (
-                f"For input {x.shape}, expected {exp_shape}, got {test_ll.shape}"
-            )
+            assert test_ll.shape == exp_shape, f"For input {x.shape}, expected {exp_shape}, got {test_ll.shape}"
 
-    @pytest.mark.parametrize(
-        "shape", [(2, 3, 64, 64), (1, 1, 128, 128), (4, 3, 120, 160)]
-    )
+    @pytest.mark.parametrize("shape", [(2, 3, 64, 64), (1, 1, 128, 128), (4, 3, 120, 160)])
     def test_different_input_shapes(self, shape):
         """Test QWT with different input shapes."""
         qwt = QuaternionWaveletTransform(wavelet="db4", device=torch.device("cpu"))
         x = torch.randn(*shape)
 
         # Perform decomposition
-        result = qwt.decompose(x, level=1)
+        result = qwt.decompose_quaternion(x, level=1)
 
         # Calculate expected shape using the actual implementation formula
         filter_size = qwt.dec_lo.size(0)  # 8 for db4

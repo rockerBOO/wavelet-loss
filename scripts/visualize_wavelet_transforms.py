@@ -134,11 +134,7 @@ def preprocess_image(
     if cv2 is not None:
         img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
     elif Image is not None:
-        img = np.array(
-            Image.fromarray(img).resize(
-                (new_width, new_height), Image.Resampling.LANCZOS
-            )
-        )
+        img = np.array(Image.fromarray(img).resize((new_width, new_height), Image.Resampling.LANCZOS))
 
     # Ensure power of two dimensions if requested
     if force_power_of_two:
@@ -148,9 +144,7 @@ def preprocess_image(
 
         # Create padded canvas
         if len(img.shape) == 3:
-            canvas = np.zeros(
-                (new_height_pow2, new_width_pow2, img.shape[2]), dtype=img.dtype
-            )
+            canvas = np.zeros((new_height_pow2, new_width_pow2, img.shape[2]), dtype=img.dtype)
         else:
             canvas = np.zeros((new_height_pow2, new_width_pow2), dtype=img.dtype)
 
@@ -205,21 +199,13 @@ def visualize_wavelet_transforms(
 
     # If a specific transform is provided, use it
     if transform_class is not None:
-        transforms = {
-            transform_desc or transform_class.__name__: transform_class(wavelet, device)
-        }
+        transforms = {transform_desc or transform_class.__name__: transform_class(wavelet, device)}
     else:
         # Default transforms
         transforms = {
-            "DWT (Discrete Wavelet Transform)": DiscreteWaveletTransform(
-                wavelet, device
-            ),
-            "SWT (Stationary Wavelet Transform)": StationaryWaveletTransform(
-                wavelet, device
-            ),
-            "QWT (Quaternion Wavelet Transform)": QuaternionWaveletTransform(
-                wavelet, device
-            ),
+            "DWT (Discrete Wavelet Transform)": DiscreteWaveletTransform(wavelet, device),
+            "SWT (Stationary Wavelet Transform)": StationaryWaveletTransform(wavelet, device),
+            "QWT (Quaternion Wavelet Transform)": QuaternionWaveletTransform(wavelet, device),
         }
 
     # Set up visualization
@@ -242,12 +228,8 @@ def visualize_wavelet_transforms(
 
         # Create a figure with rows for components and columns for bands
         total_cols = level * len(bands) + 1
-        fig, axes = plt.subplots(
-            len(components), total_cols, figsize=(4 * total_cols, 4 * len(components))
-        )
-        plt.subplots_adjust(
-            wspace=0.1, hspace=0.2, left=0.02, right=0.98, top=0.95, bottom=0.05
-        )
+        fig, axes = plt.subplots(len(components), total_cols, figsize=(4 * total_cols, 4 * len(components)))
+        plt.subplots_adjust(wspace=0.1, hspace=0.2, left=0.02, right=0.98, top=0.95, bottom=0.05)
 
         # Plot original image in the first column
         if len(components) == 1:
@@ -295,31 +277,23 @@ def visualize_wavelet_transforms(
                         coeff_data = comp_coeffs[band][level_idx][0, 0].cpu().numpy()
 
                     # Normalize for visualization
-                    coeff_norm = (coeff_data - coeff_data.min()) / (
-                        coeff_data.max() - coeff_data.min() + 1e-8
-                    )
+                    coeff_norm = (coeff_data - coeff_data.min()) / (coeff_data.max() - coeff_data.min() + 1e-8)
 
                     # Plot
                     title = f"{band.upper()}{level_idx + 1}"
                     if component is not None:
                         title = f"{component.upper()}-{title}"
 
-                    axes[comp_idx][col_idx].imshow(
-                        coeff_norm, cmap="RdBu_r", aspect="equal"
-                    )
+                    axes[comp_idx][col_idx].imshow(coeff_norm, cmap="RdBu_r", aspect="equal")
                     axes[comp_idx][col_idx].set_title(title, fontsize=8)
                     axes[comp_idx][col_idx].axis("off")
 
         # Add transform type as suptitle
-        plt.suptitle(
-            f"{transform_name}\n{wavelet} Wavelet, {level} Levels", fontsize=16
-        )
+        plt.suptitle(f"{transform_name}\n{wavelet} Wavelet, {level} Levels", fontsize=16)
 
         # Determine save path for this transform
         if save_paths:
-            print(
-                f"Saving {transform_name} visualization to {len(save_paths)} file(s):"
-            )
+            print(f"Saving {transform_name} visualization to {len(save_paths)} file(s):")
             for save_path in save_paths:
                 # Determine file format from extension
                 fmt = save_path.stem[1:]
@@ -355,9 +329,7 @@ def main():
         default="db4",
         help="Wavelet family to use (default: db4)",
     )
-    parser.add_argument(
-        "--level", type=int, default=3, help="Wavelet decomposition levels (default: 3)"
-    )
+    parser.add_argument("--level", type=int, default=3, help="Wavelet decomposition levels (default: 3)")
 
     # Transform type selection
     parser.add_argument(
@@ -384,9 +356,7 @@ def main():
     )
 
     # Additional arguments
-    parser.add_argument(
-        "--grayscale", action="store_true", help="Convert image to grayscale"
-    )
+    parser.add_argument("--grayscale", action="store_true", help="Convert image to grayscale")
     parser.add_argument(
         "--quality",
         type=int,
@@ -414,9 +384,7 @@ def main():
 
     # Filter selected transforms
     selected_transforms = {
-        name: (desc, transform)
-        for name, (desc, transform) in available_transforms.items()
-        if name in args.transforms
+        name: (desc, transform) for name, (desc, transform) in available_transforms.items() if name in args.transforms
     }
 
     # Visualize transforms
@@ -430,9 +398,7 @@ def main():
         base_filename = f"wavelet_transforms_{base_transform}"
 
         # Generate output paths
-        output_paths = [
-            Path(output_dir / f"{base_filename}.{fmt}") for fmt in args.output_formats
-        ]
+        output_paths = [Path(output_dir / f"{base_filename}.{fmt}") for fmt in args.output_formats]
 
         # Create visualization
         visualize_wavelet_transforms(

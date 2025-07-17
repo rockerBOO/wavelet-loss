@@ -1482,7 +1482,7 @@ requires-dist = [
     { name = "opencv-python", marker = "extra == 'image'", specifier = ">=4.7.0" },
     { name = "pillow", marker = "extra == 'image'", specifier = ">=10.0.0" },
     { name = "pywavelets", specifier = ">=1.8.0" },
-    { name = "torch", specifier = ">=2.7.1" },
+    { name = "torch", specifier = ">=2.0.0" },
 ]
 provides-extras = ["visualize", "image", "vae"]
 

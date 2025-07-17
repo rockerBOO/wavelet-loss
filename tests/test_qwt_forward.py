@@ -23,12 +23,12 @@ class TestQWTForward:
         for b in range(batch_size):
             for c in range(channels):
                 # Sinusoidal pattern with added noise
-                pred[b, c] = torch.sin(torch.linspace(0, 4 * np.pi, width)).view(
-                    1, -1
-                ) * torch.sin(torch.linspace(0, 4 * np.pi, height)).view(-1, 1)
-                target[b, c] = torch.sin(torch.linspace(0, 4 * np.pi, width)).view(
-                    1, -1
-                ) * torch.sin(torch.linspace(0, 4 * np.pi, height)).view(-1, 1)
+                pred[b, c] = torch.sin(torch.linspace(0, 4 * np.pi, width)).view(1, -1) * torch.sin(
+                    torch.linspace(0, 4 * np.pi, height)
+                ).view(-1, 1)
+                target[b, c] = torch.sin(torch.linspace(0, 4 * np.pi, width)).view(1, -1) * torch.sin(
+                    torch.linspace(0, 4 * np.pi, height)
+                ).view(-1, 1)
 
                 # Add some differences
                 if b == 1:
@@ -42,21 +42,17 @@ class TestQWTForward:
         """Test the basic signature and return types of the QWT forward method"""
         pred, target, device = setup_qwt_inputs
 
-        loss_fn = WaveletLoss(
-            wavelet="db4", level=2, transform_type="qwt", device=device
-        )
+        loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
 
         # Call forward method
         losses, component_losses = loss_fn(pred, target)
 
         # Check return types
         assert isinstance(losses, list), "Losses should be a list"
-        assert isinstance(component_losses, dict), (
-            "Component losses should be a dictionary"
-        )
+        assert isinstance(component_losses, dict), "Component losses should be a dictionary"
 
         # Check losses structure
-        assert len(losses) == 2, "Should have losses for 2 levels"
+        assert len(losses) == 32, "Should have 32 losses, 2 levels, 4 components, 4 bands"
         for loss in losses:
             assert isinstance(loss, torch.Tensor), "Each loss should be a tensor"
             assert loss.dim() == 4, "Loss should be a 4D tensor"
@@ -65,9 +61,7 @@ class TestQWTForward:
         """Verify the structure of component losses"""
         pred, target, device = setup_qwt_inputs
 
-        loss_fn = WaveletLoss(
-            wavelet="db4", level=2, transform_type="qwt", device=device
-        )
+        loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
 
         # Call forward method
         _, component_losses = loss_fn(pred, target)
@@ -82,9 +76,7 @@ class TestQWTForward:
                 for level in expected_levels:
                     key = f"{component}_{band}_{level}"
                     assert key in component_losses, f"Missing key: {key}"
-                    assert isinstance(component_losses[key], (float, torch.Tensor)), (
-                        f"Invalid loss type for {key}"
-                    )
+                    assert isinstance(component_losses[key], (float, torch.Tensor)), f"Invalid loss type for {key}"
 
     def test_qwt_forward_custom_component_weights(self, setup_qwt_inputs):
         """Test QWT forward with custom component weights"""
@@ -112,21 +104,15 @@ class TestQWTForward:
             for component, weight in weights.items():
                 # Check that each component has a loss entry
                 component_specific_losses = [
-                    loss
-                    for key, loss in component_losses.items()
-                    if key.startswith(f"{component}_")
+                    loss for key, loss in component_losses.items() if key.startswith(f"{component}_")
                 ]
-                assert len(component_specific_losses) > 0, (
-                    f"No losses found for component {component}"
-                )
+                assert len(component_specific_losses) > 0, f"No losses found for component {component}"
 
     def test_qwt_forward_identical_inputs(self, setup_qwt_inputs):
         """Test QWT forward method with identical inputs"""
         pred, target, device = setup_qwt_inputs
 
-        loss_fn = WaveletLoss(
-            wavelet="db4", level=2, transform_type="qwt", device=device
-        )
+        loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
 
         # Use identical inputs
         losses, component_losses = loss_fn(pred, pred)
@@ -134,15 +120,11 @@ class TestQWTForward:
         # For identical inputs, losses should be very small
         for loss in losses:
             for item in loss:
-                assert item.mean().item() < 1e-5, (
-                    "Loss for identical inputs should be near zero"
-                )
+                assert item.mean().item() < 1e-5, "Loss for identical inputs should be near zero"
 
         # Component losses should also be near zero
         for loss_value in component_losses.values():
-            assert np.abs(loss_value) < 1e-5, (
-                "Component loss for identical inputs should be near zero"
-            )
+            assert np.abs(loss_value) < 1e-5, "Component loss for identical inputs should be near zero"
 
     def test_qwt_forward_default_vs_custom_loss_fn(self, setup_qwt_inputs):
         """Test QWT forward method with different loss functions"""
@@ -150,14 +132,10 @@ class TestQWTForward:
         pred, target, device = setup_qwt_inputs
 
         # Default MSE loss
-        loss_fn_mse = WaveletLoss(
-            wavelet="db4", level=2, transform_type="qwt", device=device
-        )
+        loss_fn_mse = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
 
         # Custom L1 loss
-        loss_fn_l1 = WaveletLoss(
-            wavelet="db4", level=2, transform_type="qwt", device=device
-        )
+        loss_fn_l1 = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
         loss_fn_l1.set_loss_fn(F.l1_loss)
 
         # Compute losses
@@ -169,13 +147,9 @@ class TestQWTForward:
 
         # At least some component losses should be different
         different_loss_found = False
-        for (mse_key, mse_loss), (l1_key, l1_loss) in zip(
-            mse_component_losses.items(), l1_component_losses.items()
-        ):
+        for (mse_key, mse_loss), (l1_key, l1_loss) in zip(mse_component_losses.items(), l1_component_losses.items()):
             assert mse_key == l1_key, "Component loss keys should match"
             if abs(mse_loss - l1_loss) > 1e-6:
                 different_loss_found = True
 
-        assert different_loss_found, (
-            "At least some component losses should differ between MSE and L1"
-        )
+        assert different_loss_found, "At least some component losses should differ between MSE and L1"
