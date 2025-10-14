@@ -19,7 +19,7 @@ image = [
 ]
 vae = [
     "accelerate>=1.8.1",
-    "diffusers>=0.34.0",
+    "diffusers",
 ]
 
 [tool.ruff]
@@ -31,6 +31,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wavelet_loss", "src/wavelet_transform"]
+
+[tool.uv.sources]
+diffusers = { git = "https://github.com/huggingface/diffusers" }
 
 [dependency-groups]
 dev = [
