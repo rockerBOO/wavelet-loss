@@ -43,8 +43,6 @@ class TestWaveletLoss:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return pred.to(device), target.to(device), device
 
-    # ... (previous tests remain the same)
-
     def test_timestep_weighting(self, setup_inputs):
         """
         Test timestep weighting mechanism
@@ -187,7 +185,7 @@ class TestWaveletLoss:
             (-2, 1, "Negative threshold: -2 from end (3-2=1)"),
             (-3, 0, "Negative threshold: -3 from end (3-3=0)"),
         ]
-        
+
         for threshold, expected_effective, description in test_cases:
             loss_fn = WaveletLoss(
                 wavelet="db4",
@@ -196,56 +194,65 @@ class TestWaveletLoss:
                 device=device,
                 ll_level_threshold=threshold,
             )
-            
+
             losses, metrics = loss_fn(pred, target)
-            
+
             # Basic functionality check
             assert len(losses) > 0, f"Should produce some losses for {description}"
-            
+
             # If threshold is set, verify LL bands at lower levels are handled
             if threshold is not None:
                 # Check that metrics are calculated correctly
                 assert isinstance(metrics, dict), f"Metrics should be a dictionary for {description}"
-                
+
                 # Test the process_band method directly for LL bands
                 pred_coeffs = loss_fn.transform.decompose(pred, loss_fn.level)
                 target_coeffs = loss_fn.transform.decompose(target, loss_fn.level)
                 base_weight = torch.ones((pred.shape[0]), device=device)
-                
+
                 # Test levels within effective threshold
-                if expected_effective > 0:
+                if expected_effective is not None and expected_effective > 0:
                     for i in range(min(expected_effective, loss_fn.level)):
                         band_loss, pred_band, target_band, band_metrics = loss_fn.process_band(
                             pred_coeffs, target_coeffs, "ll", i, base_weight=base_weight
                         )
-                        
+
                         # For LL bands within threshold, should return zero loss
-                        assert torch.all(band_loss == 0.0), f"LL band at level {i+1} should have zero loss for {description}"
-                        assert torch.all(pred_band == 0), f"LL pred at level {i+1} should be zero for {description}"
-                        assert torch.all(target_band == 0), f"LL target at level {i+1} should be zero for {description}"
-                        assert band_metrics == {}, f"LL band metrics at level {i+1} should be empty for {description}"
-                
+                        assert torch.all(band_loss == 0.0), (
+                            f"LL band at level {i + 1} should have zero loss for {description}"
+                        )
+                        assert torch.all(pred_band == 0), f"LL pred at level {i + 1} should be zero for {description}"
+                        assert torch.all(target_band == 0), (
+                            f"LL target at level {i + 1} should be zero for {description}"
+                        )
+                        assert band_metrics == {}, f"LL band metrics at level {i + 1} should be empty for {description}"
+
                 # Test levels beyond effective threshold (if any)
-                for i in range(max(0, expected_effective), loss_fn.level):
-                    band_loss, pred_band, target_band, band_metrics = loss_fn.process_band(
-                        pred_coeffs, target_coeffs, "ll", i, base_weight=base_weight
-                    )
-                    
-                    # For LL bands beyond threshold, should have normal processing
-                    assert not torch.all(band_loss == 0.0), f"LL band at level {i+1} should have non-zero loss for {description}"
-                    assert not torch.all(pred_band == 0), f"LL pred at level {i+1} should not be all zeros for {description}"
-                    
+                if expected_effective is not None:
+                    for i in range(max(0, expected_effective), loss_fn.level):
+                        band_loss, pred_band, target_band, band_metrics = loss_fn.process_band(
+                            pred_coeffs, target_coeffs, "ll", i, base_weight=base_weight
+                        )
+
+                        # For LL bands beyond threshold, should have normal processing
+                        assert not torch.all(band_loss == 0.0), (
+                            f"LL band at level {i + 1} should have non-zero loss for {description}"
+                        )
+                        assert not torch.all(pred_band == 0), (
+                            f"LL pred at level {i + 1} should not be all zeros for {description}"
+                        )
+
     def test_ll_level_threshold_calculation(self, setup_inputs):
         """
         Test the threshold calculation logic directly
         """
         pred, target, device = setup_inputs
-        
+
         # Test the threshold calculation for different levels
         test_cases = [
             # (level, threshold, expected_effective_threshold)
             (3, 1, 1),
-            (3, 2, 2), 
+            (3, 2, 2),
             (3, 3, 3),
             (3, -1, 2),  # 3 + (-1) = 2
             (3, -2, 1),  # 3 + (-2) = 1
@@ -253,7 +260,7 @@ class TestWaveletLoss:
             (4, -1, 3),  # 4 + (-1) = 3
             (4, -2, 2),  # 4 + (-2) = 2
         ]
-        
+
         for level, threshold, expected in test_cases:
             loss_fn = WaveletLoss(
                 wavelet="db4",
@@ -262,48 +269,48 @@ class TestWaveletLoss:
                 device=device,
                 ll_level_threshold=threshold,
             )
-            
+
             # Calculate the effective threshold as the code does
             if threshold > 0:
                 effective_threshold = threshold
             else:
                 effective_threshold = level + threshold
-                
+
             assert effective_threshold == expected, (
                 f"For level={level}, threshold={threshold}, expected effective threshold {expected}, "
                 f"got {effective_threshold}"
             )
-            
+
             # Test that it works in practice
             pred_coeffs = loss_fn.transform.decompose(pred, loss_fn.level)
             target_coeffs = loss_fn.transform.decompose(target, loss_fn.level)
             base_weight = torch.ones((pred.shape[0]), device=device)
-            
+
             # Test each level
             for i in range(level):
                 band_loss, pred_band, target_band, band_metrics = loss_fn.process_band(
                     pred_coeffs, target_coeffs, "ll", i, base_weight=base_weight
                 )
-                
+
                 if i + 1 <= effective_threshold:
                     # Should be zero loss within threshold
                     assert torch.all(band_loss == 0.0), (
-                        f"Level {i+1} should have zero loss with threshold {threshold} "
+                        f"Level {i + 1} should have zero loss with threshold {threshold} "
                         f"(effective: {effective_threshold})"
                     )
                 else:
                     # Should have normal processing beyond threshold
                     assert not torch.all(band_loss == 0.0), (
-                        f"Level {i+1} should have non-zero loss with threshold {threshold} "
+                        f"Level {i + 1} should have non-zero loss with threshold {threshold} "
                         f"(effective: {effective_threshold})"
                     )
-                    
+
     def test_calculate_effective_ll_threshold(self, setup_inputs):
         """
         Test the _calculate_effective_ll_threshold method directly
         """
         _, _, device = setup_inputs
-        
+
         # Test cases: (level, threshold, expected_effective_threshold)
         test_cases = [
             (3, None, None),
@@ -317,7 +324,7 @@ class TestWaveletLoss:
             (4, -2, 2),  # 4 + (-2) = 2
             (5, -1, 4),  # 5 + (-1) = 4
         ]
-        
+
         for level, threshold, expected in test_cases:
             loss_fn = WaveletLoss(
                 wavelet="db4",
@@ -326,14 +333,13 @@ class TestWaveletLoss:
                 device=device,
                 ll_level_threshold=threshold,
             )
-            
+
             effective_threshold = loss_fn._calculate_effective_ll_threshold()
-            
+
             assert effective_threshold == expected, (
-                f"For level={level}, threshold={threshold}, expected {expected}, "
-                f"got {effective_threshold}"
+                f"For level={level}, threshold={threshold}, expected {expected}, got {effective_threshold}"
             )
-            
+
             # Test edge cases
             if threshold is not None and threshold != 0:
                 # Verify the logic is sound
@@ -347,58 +353,57 @@ class TestWaveletLoss:
         Test the _pad_tensors function directly
         """
         pred, target, device = setup_inputs
-        
+
         loss_fn = WaveletLoss(
             wavelet="db4",
             level=2,
             transform_type="dwt",
             device=device,
         )
-        
+
         # Create tensors with different sizes to test padding
         tensor1 = torch.randn(2, 3, 32, 32, device=device)
         tensor2 = torch.randn(2, 3, 16, 16, device=device)
         tensor3 = torch.randn(2, 3, 24, 20, device=device)
-        
+
         tensors = [tensor1, tensor2, tensor3]
-        
+
         # Test padding
         padded_tensors = loss_fn._pad_tensors(tensors)
-        
+
         # Check that all tensors have the same size
         expected_h = max(t.shape[2] for t in tensors)  # 32
         expected_w = max(t.shape[3] for t in tensors)  # 32
-        
+
         assert len(padded_tensors) == len(tensors), "Should return same number of tensors"
-        
+
         for i, padded in enumerate(padded_tensors):
             assert padded.shape[0] == tensors[i].shape[0], f"Batch dimension should be preserved for tensor {i}"
             assert padded.shape[1] == tensors[i].shape[1], f"Channel dimension should be preserved for tensor {i}"
             assert padded.shape[2] == expected_h, f"Height should be padded to {expected_h} for tensor {i}"
             assert padded.shape[3] == expected_w, f"Width should be padded to {expected_w} for tensor {i}"
-        
+
         # Test with tensors of same size (no padding needed)
         same_size_tensors = [
             torch.randn(2, 3, 16, 16, device=device),
             torch.randn(2, 3, 16, 16, device=device),
         ]
-        
+
         padded_same = loss_fn._pad_tensors(same_size_tensors)
-        
+
         for i, (original, padded) in enumerate(zip(same_size_tensors, padded_same)):
             assert torch.equal(original, padded), f"Tensor {i} should remain unchanged when no padding needed"
-        
+
         # Test that padding preserves original content
         # The original content should be in the top-left corner
         original_tensor = torch.randn(1, 1, 8, 8, device=device)
         padded_result = loss_fn._pad_tensors([original_tensor, torch.randn(1, 1, 16, 16, device=device)])
-        
+
         # Check that original content is preserved in top-left
-        assert torch.equal(
-            padded_result[0][:, :, :8, :8], 
-            original_tensor
-        ), "Original content should be preserved in top-left corner"
-        
+        assert torch.equal(padded_result[0][:, :, :8, :8], original_tensor), (
+            "Original content should be preserved in top-left corner"
+        )
+
         # Check that padding areas are zero
         assert torch.all(padded_result[0][:, :, 8:, :] == 0), "Bottom padding should be zero"
         assert torch.all(padded_result[0][:, :, :, 8:] == 0), "Right padding should be zero"
@@ -408,7 +413,7 @@ class TestWaveletLoss:
         Test _pad_tensors in the context of high frequency metrics calculation
         """
         pred, target, device = setup_inputs
-        
+
         loss_fn = WaveletLoss(
             wavelet="db4",
             level=2,
@@ -416,44 +421,46 @@ class TestWaveletLoss:
             device=device,
             metrics=True,  # Enable metrics to trigger pad_tensors usage
         )
-        
+
         # Run forward pass to trigger the pad_tensors usage
         losses, metrics = loss_fn(pred, target)
-        
+
         # Check that avg_hf metrics are calculated (which uses pad_tensors)
         assert "avg_hf_pred" in metrics, "avg_hf_pred metric should be present"
         assert "avg_hf_target" in metrics, "avg_hf_target metric should be present"
-        
+
         # The metrics should be reasonable values
         assert isinstance(metrics["avg_hf_pred"], (int, float)), "avg_hf_pred should be numeric"
         assert isinstance(metrics["avg_hf_target"], (int, float)), "avg_hf_target should be numeric"
-        
+
         # Test that the metrics are computed correctly by comparing with direct calculation
         pred_coeffs = loss_fn.transform.decompose(pred, loss_fn.level)
         target_coeffs = loss_fn.transform.decompose(target, loss_fn.level)
-        
+
         # Manually compute what should happen
         combined_hf_pred = []
         combined_hf_target = []
-        
+
         for band in ["lh", "hl", "hh"]:
             for i in range(loss_fn.level):
                 combined_hf_pred.append(pred_coeffs[band][i])
                 combined_hf_target.append(target_coeffs[band][i])
-        
+
         # This should match what happens in calculate_avg_high_frequency
         padded_pred = loss_fn._pad_tensors(combined_hf_pred)
         padded_target = loss_fn._pad_tensors(combined_hf_target)
-        
+
         combined_pred = torch.cat(padded_pred, dim=1)
         combined_target = torch.cat(padded_target, dim=1)
-        
+
         expected_avg_pred = combined_pred.mean().item()
         expected_avg_target = combined_target.mean().item()
-        
+
         # Check that the computed metrics match our manual calculation
         assert abs(metrics["avg_hf_pred"] - expected_avg_pred) < 1e-6, "avg_hf_pred should match manual calculation"
-        assert abs(metrics["avg_hf_target"] - expected_avg_target) < 1e-6, "avg_hf_target should match manual calculation"
+        assert abs(metrics["avg_hf_target"] - expected_avg_target) < 1e-6, (
+            "avg_hf_target should match manual calculation"
+        )
 
 
 # Remaining previous tests...
