@@ -55,6 +55,13 @@ class WaveletLoss(nn.Module):
         normalize_bands: bool = True,
         max_timestep: float = 1000,
         timestep_intensity: float = 0.5,
+        # SNR-Aware Huber parameters
+        use_snr_aware_huber: bool = False,
+        snr_huber_cmin: float = 0.2,  # Min threshold (robust)
+        snr_huber_cmax: float = 1.0,  # Max threshold (sensitive)
+        snr_huber_gamma: float = 5.0,  # SNR clamp value
+        snr_huber_alpha: float = 0.5,  # Threshold transition smoothness
+        min_snr_beta: float = 0.0,  # Min-SNR weighting exponent
     ):
         """
 
@@ -120,6 +127,13 @@ class WaveletLoss(nn.Module):
             "hh": 0.05,
         }
 
+        self.use_snr_aware_huber = use_snr_aware_huber
+        self.snr_huber_cmin = snr_huber_cmin
+        self.snr_huber_cmax = snr_huber_cmax
+        self.snr_huber_gamma = snr_huber_gamma
+        self.snr_huber_alpha = snr_huber_alpha
+        self.min_snr_beta = min_snr_beta
+
     def forward(
         self,
         pred_latent: Tensor,
@@ -149,14 +163,14 @@ class WaveletLoss(nn.Module):
 
         base_weight = torch.ones((batch_size), device=device)
         if timestep is not None:
-            base_weight *= self.smooth_timestep_weight(timestep)
+            base_weight = base_weight * self.smooth_timestep_weight(timestep)
             metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
 
         for i in range(self.level):
             # High frequency bands
             for band in ["ll", "lh", "hl", "hh"]:
                 band_loss, pred, target, band_metrics = self.process_band(
-                    pred_coeffs, target_coeffs, band, i, base_weight=base_weight
+                    pred_coeffs, target_coeffs, band, i, base_weight=base_weight, timestep=timestep
                 )
                 metrics.update(band_metrics)
 
@@ -288,6 +302,7 @@ class WaveletLoss(nn.Module):
         band: str,
         i: int,
         base_weight: Tensor,
+        timestep: torch.Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Metrics]:
         """
         Process a single band and calculate the loss.
@@ -323,10 +338,17 @@ class WaveletLoss(nn.Module):
 
         if self.normalize_bands:
             # Normalize wavelet components
-            pred = (pred - pred.mean()) / (pred.std() + 1e-8)
-            target = (target - target.mean()) / (target.std() + 1e-8)
+            pred_mean = pred.mean(dim=[2, 3], keepdim=True)
+            pred_std = pred.std(dim=[2, 3], keepdim=True)
+            pred = (pred - pred_mean) / (pred_std + 1e-8)
+            target_mean = target.mean(dim=[2, 3], keepdim=True)
+            target_std = target.std(dim=[2, 3], keepdim=True)
+            target = (target - target_mean) / (target_std + 1e-8)
 
-        band_loss = self.loss_fn(pred, target, reduction="none")
+        if self.use_snr_aware_huber and timestep is not None:
+            band_loss = self.snr_aware_huber_wavelet_loss(pred, target, timestep)
+        else:
+            band_loss = self.loss_fn(pred, target, reduction="none")
 
         weight = base_weight * self.band_level_weights.get(weight_key, self.band_weights[band])
         loss = weight.view(-1, 1, 1, 1) * band_loss
@@ -379,7 +401,12 @@ class WaveletLoss(nn.Module):
             for band in ["ll", "lh", "hl", "hh"]:
                 for level_idx in range(self.level):
                     band_loss, pred_coeffs, target_coeffs, band_metrics = self.process_band(
-                        pred_qwt[component], target_qwt[component], band, level_idx, base_weight=base_weight
+                        pred_qwt[component],
+                        target_qwt[component],
+                        band,
+                        level_idx,
+                        base_weight=base_weight,
+                        timestep=timestep,
                     )
                     component_losses[f"{component}_{band}_{level_idx + 1}"] = band_loss
                     metrics[f"{component}_{band}_{level_idx + 1}"] = band_loss.detach().mean().item()
@@ -429,16 +456,16 @@ class WaveletLoss(nn.Module):
     ) -> Tensor:
         """
         Calculate energy matching loss between predicted and target wavelet coefficients.
-        
+
         Args:
             batch_size: Size of the batch
             pred_coeffs: Dictionary of predicted wavelet coefficients
-            target_coeffs: Dictionary of target wavelet coefficients  
+            target_coeffs: Dictionary of target wavelet coefficients
             device: Device to create tensors on
-            
+
         Returns:
             Energy matching loss tensor
-            
+
         Notes:
             - Uses log-scale energy ratio for stability
             - Applies band-specific and level-specific weights
@@ -460,17 +487,67 @@ class WaveletLoss(nn.Module):
 
         return energy_loss
 
+    def snr_aware_huber_wavelet_loss(
+        self, 
+        pred: Tensor, 
+        target: Tensor, 
+        timestep: Tensor
+    ) -> Tensor:
+        """
+        SNR-aware adaptive threshold Huber loss from UltraFlux paper.
+        
+        Args:
+            pred: Predicted wavelet coefficients [B, C, H, W]
+            target: Target wavelet coefficients [B, C, H, W]
+            timestep: Diffusion timestep [B] in range [0, max_timestep]
+            
+        Returns:
+            Loss tensor [B, C, H, W] with adaptive Huber penalty
+            
+        Notes:
+            - Threshold adapts based on SNR: small at high noise, large at low noise
+            - Uses Pseudo-Huber for smooth, differentiable loss
+            - Optional Min-SNR weighting for timestep rebalancing
+        """
+        # Normalize timestep to [0, 1] if needed
+        if timestep.max() > 1.0:
+            timestep = timestep / self.max_timestep
+        
+        # Calculate SNR for straight flow matching path: SNR(t) = (1-t)²/t²
+        snr = ((1 - timestep) ** 2) / (timestep ** 2 + 1e-8)
+        
+        # Adaptive threshold (Eq. 12 in paper)
+        snr_clamped = torch.clamp(snr, max=self.snr_huber_gamma)
+        
+        c_t = self.snr_huber_cmin + (self.snr_huber_cmax - self.snr_huber_cmin) * (
+            snr_clamped / self.snr_huber_gamma
+        ) ** self.snr_huber_alpha
+        
+        # Pseudo-Huber: ρ_c(r) = c² * (√(1 + (r/c)²) - 1)
+        diff = pred - target
+        huber = c_t.view(-1, 1, 1, 1) ** 2 * (
+            torch.sqrt(1 + (diff / c_t.view(-1, 1, 1, 1)) ** 2) - 1
+        )
+        
+        # Optional Min-SNR weighting (typically beta=0 in paper)
+        if self.min_snr_beta > 0:
+            snr_clamped_weight = torch.clamp(snr, max=self.snr_huber_gamma)
+            weight = (timestep / (1 - timestep + 1e-8)) * (snr_clamped_weight ** self.min_snr_beta)
+            return weight.view(-1, 1, 1, 1) * huber
+        
+        return huber
+
     @torch.no_grad()
     def calculate_raw_energy_metrics(self, pred_stack: Tensor, target_stack: Tensor, band: str, level: int):
         """
         Calculate raw energy metrics for a specific band and level.
-        
+
         Args:
             pred_stack: Predicted wavelet coefficients tensor
             target_stack: Target wavelet coefficients tensor
             band: Wavelet band name (e.g., "lh", "hl", "hh")
             level: Wavelet decomposition level
-            
+
         Returns:
             Dictionary containing raw energy metrics for the band/level
         """
@@ -490,14 +567,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate metrics for cross-scale consistency between adjacent wavelet levels.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing cross-scale consistency metrics
-            
+
         Notes:
             - Compares energy ratios between adjacent scales
             - Uses log-scale differences for stability
@@ -539,14 +616,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate spatial correlation metrics between predicted and target wavelet coefficients.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing correlation metrics for each band and level
-            
+
         Notes:
             - Calculates correlation across spatial dimensions
             - Provides per-level and per-band averaged correlations
@@ -589,14 +666,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate metrics for directional consistency between wavelet bands.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing directional consistency metrics
-            
+
         Notes:
             - Analyzes horizontal vs vertical energy ratios (hl/lh)
             - Analyzes diagonal vs horizontal+vertical energy ratios (hh/(hl+lh))
@@ -650,13 +727,13 @@ class WaveletLoss(nn.Module):
     def calculate_latent_regularity_metrics(self, pred_latents: Tensor) -> dict:
         """
         Calculate metrics for latent space regularity and smoothness.
-        
+
         Args:
             pred_latents: Predicted latent tensor
-            
+
         Returns:
             Dictionary containing latent regularity metrics
-            
+
         Notes:
             - Calculates total variation (TV) for smoothness measurement
             - Provides statistical metrics (mean, std)
@@ -696,14 +773,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate sparsity metrics for wavelet coefficients.
-        
+
         Args:
             coeffs: Dictionary of wavelet coefficients
             reference_coeffs: Optional reference coefficients for relative sparsity
-            
+
         Returns:
             Dictionary containing sparsity metrics
-            
+
         Notes:
             - Uses L1 norm as primary sparsity measure
             - Calculates non-zero ratio (threshold at 0.01)
@@ -744,13 +821,13 @@ class WaveletLoss(nn.Module):
     def smooth_timestep_weight(self, timestep):
         """
         Calculate smooth timestep-based weight using sigmoid transition.
-        
+
         Args:
             timestep: Current diffusion timestep tensor
-            
+
         Returns:
             Smooth weight tensor with sigmoid transition instead of hard cutoff
-            
+
         Notes:
             - Weight decreases as timestep increases (later in denoising process)
             - Uses sigmoid for smooth transition around progress=0.3
@@ -763,13 +840,13 @@ class WaveletLoss(nn.Module):
     def _calculate_effective_ll_threshold(self) -> int | None:
         """
         Calculate the effective LL level threshold.
-        
+
         For positive values, returns the value as-is.
         For negative values, calculates from the end: level + threshold
-        
+
         Returns:
             Effective threshold level, or None if no threshold is set
-            
+
         Examples:
             level=3, threshold=1  -> 1
             level=3, threshold=2  -> 2
@@ -778,7 +855,7 @@ class WaveletLoss(nn.Module):
         """
         if self.ll_level_threshold is None:
             return None
-            
+
         if self.ll_level_threshold > 0:
             return self.ll_level_threshold
         else:

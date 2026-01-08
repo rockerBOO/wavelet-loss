@@ -6,6 +6,7 @@ Supports different wavelet transform types and visualization.
 
 import argparse
 from pathlib import Path
+from diffusers.models.autoencoders import AutoencoderKLQwenImage
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -293,6 +294,8 @@ def main():
         help="Hugging Face VAE model name or path (default: stabilityai/sd-vae-ft-mse)",
     )
 
+    parser.add_argument("--subfolder", help="Subfolder on hugging face with the VAE")
+
     # Wavelet loss configuration arguments
     parser.add_argument("--wavelet", type=str, default="db4", help="Wavelet family to use (default: db4)")
     parser.add_argument("--level", type=int, default=3, help="Wavelet decomposition level (default: 3)")
@@ -342,7 +345,7 @@ def main():
 
     # Load VAE model and processor
     print(f"Loading VAE model: {args.vae_model}")
-    vae, processor = load_vae_model(args.vae_model)
+    vae, processor = load_vae_model(args.vae_model, subfolder=args.subfolder)
     vae = vae.to(device)
     vae.eval()
 
@@ -350,10 +353,18 @@ def main():
     img1_tensor = preprocess_image_with_vae_processor(img1, processor)
     img2_tensor = preprocess_image_with_vae_processor(img2, processor)
 
+    if isinstance(vae, AutoencoderKLQwenImage):
+        img1_tensor = img1_tensor.unsqueeze(2)
+        img2_tensor = img2_tensor.unsqueeze(2)
+
     # Encode images to latent space
     print("Encoding images to VAE latent space...")
     latent1, _, _ = encode_image_to_latent(vae, processor, img1_tensor, device)
     latent2, _, _ = encode_image_to_latent(vae, processor, img2_tensor, device)
+
+    if isinstance(vae, AutoencoderKLQwenImage):
+        latent1 = latent1.squeeze(2)
+        latent2 = latent2.squeeze(2)
 
     print(f"Latent 1 shape: {latent1.shape}")
     print(f"Latent 2 shape: {latent2.shape}")
