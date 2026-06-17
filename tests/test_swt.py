@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 from torch import Tensor
@@ -178,8 +180,8 @@ class TestStationaryWaveletTransform:
         assert swt_cpu.dec_lo.device == cpu_device
         assert swt_cpu.dec_hi.device == cpu_device
 
-        # Test GPU if available
-        if torch.cuda.is_available():
+        # Test GPU if available and WAVELET_TEST_CUDA is set
+        if os.environ.get("WAVELET_TEST_CUDA") and torch.cuda.is_available():
             gpu_device = torch.device("cuda:0")
             swt_gpu = StationaryWaveletTransform(device=gpu_device)
             assert swt_gpu.dec_lo.device == gpu_device

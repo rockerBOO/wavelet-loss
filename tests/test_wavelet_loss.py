@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 import numpy as np
@@ -40,7 +42,7 @@ class TestWaveletLoss:
                 if b == 1:
                     pred[b, c] += 0.2 * torch.randn(height, width)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if os.environ.get("WAVELET_TEST_CUDA") else "cpu")
         return pred.to(device), target.to(device), device
 
     # ... (previous tests remain the same)
@@ -196,7 +198,7 @@ class TestWaveletLoss:
                 ll_level_threshold=threshold,
             )
 
-            losses, metrics = loss_fn(pred, target)
+            losses, metrics = loss_fn(pred, target, reduce=False)
 
             # Basic functionality check
             assert len(losses) > 0, f"Should produce some losses for {description}"

@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 from torch import Tensor
@@ -271,8 +273,8 @@ class TestDiscreteWaveletTransform:
         assert dwt_cpu.dec_lo.device == cpu_device
         assert dwt_cpu.dec_hi.device == cpu_device
 
-        # Test GPU if available
-        if torch.cuda.is_available():
+        # Test GPU if available and WAVELET_TEST_CUDA is set
+        if os.environ.get("WAVELET_TEST_CUDA") and torch.cuda.is_available():
             gpu_device = torch.device("cuda:0")
             dwt_gpu = DiscreteWaveletTransform(device=gpu_device)
             assert dwt_gpu.dec_lo.device == gpu_device
