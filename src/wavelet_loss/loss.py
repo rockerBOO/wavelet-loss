@@ -118,12 +118,13 @@ class WaveletLoss(nn.Module):
         pred_latent: Tensor,
         target_latent: Tensor,
         timestep: torch.Tensor | None = None,
-    ) -> tuple[list[Tensor], Mapping[str, int | float | None]]:
+        reduce: bool = True,
+    ) -> tuple[Tensor | list[Tensor], Mapping[str, int | float | None]]:
         """
         Calculate wavelet loss between prediction and target.
 
         Returns:
-            loss: Total wavelet loss
+            loss: Total wavelet loss (scalar if reduce=True, list of tensors if reduce=False)
             metrics: Wavelet metrics if requested in WaveletLoss(metrics=True)
         """
         if pred_latent.ndim != 4 or target_latent.ndim != 4:
@@ -133,7 +134,7 @@ class WaveletLoss(nn.Module):
             )
 
         if isinstance(self.transform, QuaternionWaveletTransform):
-            return self.quaternion_forward(pred_latent, target_latent, timestep)
+            return self.quaternion_forward(pred_latent, target_latent, timestep, reduce)
 
         batch_size = pred_latent.shape[0]
         device = pred_latent.device
@@ -183,6 +184,9 @@ class WaveletLoss(nn.Module):
                 metrics.update(self.process_loss_metrics(pattern_losses, losses, energy_loss))
                 metrics.update(self.process_latent_metrics(pred_latent))
 
+        if reduce:
+            total = sum(loss_item.mean() for loss_item in losses)
+            return total, metrics
         return losses, metrics
 
     def process_coeff_metrics(
@@ -338,8 +342,8 @@ class WaveletLoss(nn.Module):
         return loss, pred, target, metrics
 
     def quaternion_forward(
-        self, pred: Tensor, target: Tensor, timestep: Tensor | None
-    ) -> tuple[list[Tensor], Mapping[str, int | float | None]]:
+        self, pred: Tensor, target: Tensor, timestep: Tensor | None, reduce: bool = True
+    ) -> tuple[Tensor | list[Tensor], Mapping[str, int | float | None]]:
         """
         Calculate QWT loss between prediction and target.
 
@@ -399,6 +403,9 @@ class WaveletLoss(nn.Module):
             metrics.update(self.process_loss_metrics(pattern_losses, pattern_losses, energy_loss=None))
             metrics.update(self.process_latent_metrics(pred))
 
+        if reduce:
+            total = sum(loss_item.mean() for loss_item in pattern_losses)
+            return total, metrics
         return pattern_losses, metrics
 
     def _pad_tensors(self, tensors: list[Tensor]) -> list[Tensor]:
