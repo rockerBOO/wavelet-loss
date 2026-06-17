@@ -2,7 +2,7 @@
 import numpy as np
 import pywt
 import torch
-from wavelet_transform.backends import PytorchWaveletsBackend
+from wavelet_transform.backends import CustomDWTBackend, PytorchWaveletsBackend
 
 
 def _rel(a, b):
@@ -31,3 +31,33 @@ def test_pytorch_wavelets_backend_per_level_ll_shapes():
     assert bands["ll"][0].shape[-1] == 19
     assert bands["ll"][1].shape[-1] == 13
     assert bands["ll"][2].shape[-1] == 10
+
+
+def test_custom_dwt_backend_matches_pywt_dwt2_zero():
+    torch.manual_seed(0)
+    x = torch.randn(1, 1, 31, 33, dtype=torch.float64)  # odd dims
+    for wavelet in ["haar", "db2", "db4", "sym4", "coif2"]:
+        bands = CustomDWTBackend(wavelet=wavelet, mode="zero").decompose(x, level=1)
+        cA, (cH, cV, cD) = pywt.dwt2(x[0, 0].numpy(), wavelet, mode="zero")
+        assert _rel(bands["ll"][0][0, 0].numpy(), cA) < 1e-6
+        assert _rel(bands["lh"][0][0, 0].numpy(), cH) < 1e-6
+        assert _rel(bands["hl"][0][0, 0].numpy(), cV) < 1e-6
+        assert _rel(bands["hh"][0][0, 0].numpy(), cD) < 1e-6
+
+
+def test_custom_dwt_matches_pytorch_wavelets_backend():
+    torch.manual_seed(0)
+    x = torch.randn(2, 3, 32, 32)
+    for wavelet in ["haar", "db4", "sym4"]:
+        lib = PytorchWaveletsBackend(wavelet=wavelet, mode="zero").decompose(x, level=2)
+        cust = CustomDWTBackend(wavelet=wavelet, mode="zero").decompose(x, level=2)
+        for band in ["ll", "lh", "hl", "hh"]:
+            for i in range(2):
+                assert torch.allclose(lib[band][i], cust[band][i], rtol=1e-4, atol=1e-6)
+
+
+def test_custom_dwt_rejects_unsupported_mode():
+    import pytest
+
+    with pytest.raises(NotImplementedError):
+        CustomDWTBackend(wavelet="db4", mode="symmetric")
