@@ -577,59 +577,6 @@ class WaveletLoss(nn.Module):
 
         return metrics
 
-    @torch.no_grad()
-    def calculate_sparsity_metrics(
-        self,
-        coeffs: dict[str, list[Tensor]],
-        reference_coeffs: dict[str, list[Tensor]] | None = None,
-    ) -> dict:
-        """
-        Calculate sparsity metrics for wavelet coefficients.
-
-        Args:
-            coeffs: Dictionary of wavelet coefficients
-            reference_coeffs: Optional reference coefficients for relative sparsity
-
-        Returns:
-            Dictionary containing sparsity metrics
-
-        Notes:
-            - Uses L1 norm as primary sparsity measure
-            - Calculates non-zero ratio (threshold at 0.01)
-            - Provides relative sparsity if reference coefficients given
-            - Computes average sparsity score across all bands
-        """
-        metrics = {}
-        band_sparsities = []
-        band_non_zero_ratios = []
-
-        for band in ["lh", "hl", "hh"]:
-            for i in range(1, self.level + 1):
-                coef = coeffs[band][i - 1]
-
-                # L1 norm (sparsity measure)
-                l1_norm = torch.mean(torch.abs(coef)).item()
-                metrics[f"{band}{i}_l1_norm"] = l1_norm
-                band_sparsities.append(l1_norm)
-
-                # Additional sparsity metrics
-                non_zero_ratio = torch.mean((torch.abs(coef) > 0.01).float()).item()
-                metrics[f"{band}{i}_non_zero_ratio"] = non_zero_ratio
-                band_non_zero_ratios.append(non_zero_ratio)
-
-                # If reference coefficients provided, calculate relative sparsity
-                if reference_coeffs is not None:
-                    ref_coef = reference_coeffs[band][i - 1]
-                    ref_l1_norm = torch.mean(torch.abs(ref_coef)).item()
-                    rel_sparsity = l1_norm / (ref_l1_norm + 1e-8)
-                    metrics[f"{band}{i}_relative_sparsity"] = rel_sparsity
-
-        # Average sparsity across bands
-        if band_sparsities:
-            metrics["avg_sparsity_score"] = 1.0 / (sum(band_sparsities) / len(band_sparsities) + 1e-8)
-
-        return metrics
-
     def smooth_timestep_weight(self, timestep):
         """
         Calculate smooth timestep-based weight using sigmoid transition.

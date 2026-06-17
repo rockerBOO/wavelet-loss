@@ -79,3 +79,12 @@ def test_energy_is_amplitude_sensitive():
     ratio = metrics["wavelet_loss/avg_hf_energy_pred"] / metrics["wavelet_loss/avg_hf_energy_target"]
     # energy ~ amplitude^2, so a 5x-scaled prediction has ~25x the HF energy
     assert 20.0 < ratio < 30.0
+
+
+def test_sparsity_metrics_removed():
+    lf = _loss()
+    pred, target = _inputs()
+    _, metrics = lf(pred, target)
+    assert not any("sparsity" in k for k in metrics)
+    assert not any("l1_norm" in k for k in metrics)
+    assert not any("non_zero_ratio" in k for k in metrics)
