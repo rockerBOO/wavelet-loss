@@ -74,6 +74,8 @@ class WaveletTransform:
         """
         assert pywt.Wavelet is not None, "PyWavelets module not available. Please install `pip install PyWavelets`"
 
+        self.wavelet = wavelet
+
         # Create filters from wavelet
         wav = pywt.Wavelet(wavelet)
         self.dec_lo = torch.tensor(wav.dec_lo).to(device)
@@ -111,6 +113,8 @@ class DiscreteWaveletTransform(WaveletTransform):
         """
         Perform multi-level DWT decomposition.
 
+        Delegates to CustomDWTBackend (mode='zero') which matches pywt.dwt2(mode='zero').
+
         Args:
             x: Input tensor [B, C, H, W]
             level: Number of decomposition levels
@@ -123,25 +127,9 @@ class DiscreteWaveletTransform(WaveletTransform):
             - 'hl': High-low (vertical detail) coefficients
             - 'hh': High-high (diagonal detail) coefficients
         """
-        bands: dict[str, list[Tensor]] = {
-            "ll": [],
-            "lh": [],
-            "hl": [],
-            "hh": [],
-        }
+        from .backends import CustomDWTBackend
 
-        # Start low frequency with input
-        ll = x
-
-        for _ in range(level):
-            ll, lh, hl, hh = self._dwt_single_level(ll)
-
-            bands["lh"].append(lh)
-            bands["hl"].append(hl)
-            bands["hh"].append(hh)
-            bands["ll"].append(ll)
-
-        return bands
+        return CustomDWTBackend(self.wavelet, mode="zero", device=x.device).decompose(x, level)
 
     def _dwt_single_level(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """
