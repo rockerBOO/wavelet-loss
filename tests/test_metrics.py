@@ -49,3 +49,33 @@ def test_weighted_band_losses_sum_to_total():
     _, metrics = lf(pred, target)
     weighted = sum(v for k, v in metrics.items() if k.startswith("wavelet_loss/weighted_band_loss/"))
     assert abs(weighted - metrics["wavelet_loss/total"]) < 1e-5
+
+
+def test_avg_hf_signed_mean_metrics_removed():
+    lf = _loss()
+    pred, target = _inputs()
+    _, metrics = lf(pred, target)
+    assert "avg_hf_pred" not in metrics
+    assert "avg_hf_target" not in metrics
+
+
+def test_energy_metrics_present_and_nonnegative():
+    lf = _loss()
+    pred, target = _inputs()
+    _, metrics = lf(pred, target)
+    assert "wavelet_loss/energy/lh1_pred" in metrics
+    assert "wavelet_loss/energy/lh1_target" in metrics
+    assert "wavelet_loss/avg_hf_energy_pred" in metrics
+    assert "wavelet_loss/avg_hf_energy_target" in metrics
+    assert metrics["wavelet_loss/avg_hf_energy_pred"] >= 0.0
+    assert metrics["wavelet_loss/avg_hf_energy_target"] >= 0.0
+
+
+def test_energy_is_amplitude_sensitive():
+    lf = _loss()
+    torch.manual_seed(0)
+    target = torch.randn(2, 4, 32, 32)
+    _, metrics = lf(5 * target, target)
+    ratio = metrics["wavelet_loss/avg_hf_energy_pred"] / metrics["wavelet_loss/avg_hf_energy_target"]
+    # energy ~ amplitude^2, so a 5x-scaled prediction has ~25x the HF energy
+    assert 20.0 < ratio < 30.0

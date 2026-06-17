@@ -177,32 +177,42 @@ class WaveletLoss(nn.Module):
     ) -> Metrics:
         metrics: Metrics = {}
         metrics.update(self.calculate_correlation_metrics(pred_coeffs, target_coeffs))
-        metrics.update(self.calculate_avg_high_frequency(pred_coeffs, target_coeffs))
+        metrics.update(self.calculate_energy_metrics(pred_coeffs, target_coeffs))
         metrics.update(self.calculate_cross_scale_consistency_metrics(pred_coeffs, target_coeffs))
         metrics.update(self.calculate_directional_consistency_metrics(pred_coeffs, target_coeffs))
-        metrics.update(self.calculate_sparsity_metrics(pred_coeffs, target_coeffs))
 
         return metrics
 
-    def calculate_avg_high_frequency(
-        self, pred_coeffs: dict[str, list[Tensor]], target_coeffs: dict[str, list[Tensor]]
+    @torch.no_grad()
+    def calculate_energy_metrics(
+        self,
+        pred_coeffs: dict[str, list[Tensor]],
+        target_coeffs: dict[str, list[Tensor]],
     ) -> Metrics:
+        """Per-band coefficient energy (mean of squares) for pred and target.
+
+        Energy is non-negative and amplitude-sensitive, so it surfaces the
+        scale/amplitude errors that correlation and ratio metrics are blind to
+        (e.g. a uniformly scaled prediction). Replaces the old signed-mean
+        ``avg_hf_*`` metrics, which hovered near zero by construction.
+        """
         metrics: Metrics = {}
-        combined_hf_pred = []
-        combined_hf_target = []
+        hf_pred: list[float] = []
+        hf_target: list[float] = []
 
-        for band in ["lh", "hl", "hh"]:
+        for band in ["ll", "lh", "hl", "hh"]:
             for i in range(self.level):
-                combined_hf_pred.append(pred_coeffs[band][i])
-                combined_hf_target.append(target_coeffs[band][i])
-        combined_hf_pred = self._pad_tensors(combined_hf_pred)
-        combined_hf_target = self._pad_tensors(combined_hf_target)
+                pred_e = torch.mean(pred_coeffs[band][i] ** 2).item()
+                target_e = torch.mean(target_coeffs[band][i] ** 2).item()
+                metrics[f"wavelet_loss/energy/{band}{i + 1}_pred"] = pred_e
+                metrics[f"wavelet_loss/energy/{band}{i + 1}_target"] = target_e
+                if band != "ll":
+                    hf_pred.append(pred_e)
+                    hf_target.append(target_e)
 
-        combined_hf_pred = torch.cat(combined_hf_pred, dim=1)
-        combined_hf_target = torch.cat(combined_hf_target, dim=1)
-
-        metrics["avg_hf_pred"] = combined_hf_pred.detach().mean().item()
-        metrics["avg_hf_target"] = combined_hf_target.detach().mean().item()
+        if hf_pred:
+            metrics["wavelet_loss/avg_hf_energy_pred"] = sum(hf_pred) / len(hf_pred)
+            metrics["wavelet_loss/avg_hf_energy_target"] = sum(hf_target) / len(hf_target)
 
         return metrics
 
@@ -360,48 +370,6 @@ class WaveletLoss(nn.Module):
             total = sum(loss_item.mean() for loss_item in pattern_losses)
             return total, metrics
         return pattern_losses, metrics
-
-    def _pad_tensors(self, tensors: list[Tensor]) -> list[Tensor]:
-        """Pad tensors to match the largest size."""
-        # Find max dimensions
-        max_h = max(t.shape[2] for t in tensors)
-        max_w = max(t.shape[3] for t in tensors)
-
-        padded_tensors = []
-        for tensor in tensors:
-            h_pad = max_h - tensor.shape[2]
-            w_pad = max_w - tensor.shape[3]
-
-            if h_pad > 0 or w_pad > 0:
-                # Pad bottom and right to match max dimensions
-                padded = F.pad(tensor, (0, w_pad, 0, h_pad))
-                padded_tensors.append(padded)
-            else:
-                padded_tensors.append(tensor)
-
-        return padded_tensors
-
-    @torch.no_grad()
-    def calculate_raw_energy_metrics(self, pred_stack: Tensor, target_stack: Tensor, band: str, level: int):
-        """
-        Calculate raw energy metrics for a specific band and level.
-
-        Args:
-            pred_stack: Predicted wavelet coefficients tensor
-            target_stack: Target wavelet coefficients tensor
-            band: Wavelet band name (e.g., "lh", "hl", "hh")
-            level: Wavelet decomposition level
-
-        Returns:
-            Dictionary containing raw energy metrics for the band/level
-        """
-        metrics: dict[str, float | int] = {}
-        metrics[f"{band}{level}_raw_pred_energy"] = torch.mean(pred_stack**2).detach().item()
-        metrics[f"{band}{level}_raw_target_energy"] = torch.mean(target_stack**2).detach().item()
-
-        metrics[f"{band}{level}_raw_error"] = self.loss_fn(pred_stack.float(), target_stack.float()).detach().item()
-
-        return metrics
 
     @torch.no_grad()
     def calculate_cross_scale_consistency_metrics(
