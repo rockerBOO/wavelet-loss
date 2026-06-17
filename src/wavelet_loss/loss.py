@@ -50,7 +50,7 @@ class WaveletLoss(nn.Module):
         metrics: bool = False,
         energy_ratio: float = 0.0,
         energy_scale_factor: float = 0.01,
-        normalize_bands: bool = True,
+        normalize_bands: bool = False,
         max_timestep: float = 1000,
         timestep_intensity: float = 0.5,
     ):
@@ -321,9 +321,12 @@ class WaveletLoss(nn.Module):
         target = target_coeffs[band][i]
 
         if self.normalize_bands:
-            # Normalize wavelet components
-            pred = (pred - pred.mean()) / (pred.std() + 1e-8)
-            target = (target - target.mean()) / (target.std() + 1e-8)
+            # Shared normalization: use the TARGET band statistics for BOTH tensors
+            # so relative amplitude/offset errors are preserved (not zeroed out).
+            mean = target.mean()
+            std = target.std() + 1e-8
+            pred = (pred - mean) / std
+            target = (target - mean) / std
 
         band_loss = self.loss_fn(pred, target, reduction="none")
 
