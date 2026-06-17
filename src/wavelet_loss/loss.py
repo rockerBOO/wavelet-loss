@@ -162,7 +162,7 @@ class WaveletLoss(nn.Module):
         if self.metrics:
             with torch.no_grad():
                 metrics.update(self.process_coeff_metrics(pred_coeffs, target_coeffs))
-                metrics.update(self.process_loss_metrics(pattern_losses, losses, energy_loss=None))
+                metrics.update(self.process_loss_metrics(pattern_losses))
                 metrics.update(self.process_latent_metrics(pred_latent))
 
         if reduce:
@@ -222,35 +222,16 @@ class WaveletLoss(nn.Module):
 
         return metrics
 
-    def process_loss_metrics(
-        self,
-        pattern_losses: list[Tensor],
-        losses: list[Tensor],
-        energy_loss: Tensor | None,
-    ):
+    def process_loss_metrics(self, losses: list[Tensor]) -> Metrics:
+        """Aggregate the weighted per-band losses into a scalar total metric.
+
+        ``losses`` are the weighted per-band loss tensors — the same ones summed
+        for the ``reduce=True`` return — so this mirrors the optimized objective
+        exactly. Per-band breakdowns are emitted by ``process_band``.
         """
-        Process loss metrics
-
-        Args:
-            metrics: The metrics dictionary
-            pattern_losses: The pattern losses
-            losses: The total losses
-            energy_loss: The energy loss
-
-        Returns:
-            metrics: The updated metrics dictionary
-        """
-        metrics: dict[str, int | float | None] = {}
-        # Add loss components to metrics
-        for i, pattern_loss in enumerate(pattern_losses):
-            metrics[f"pattern_loss-{i + 1}"] = pattern_loss.detach().mean().item()
-
-        for i, total_loss in enumerate(losses):
-            metrics[f"total_loss-{i + 1}"] = total_loss.detach().mean().item()
-
-        if energy_loss is not None:
-            metrics["energy_loss"] = energy_loss.detach().mean().item()
-
+        metrics: Metrics = {}
+        total = sum(loss_item.detach().mean() for loss_item in losses)
+        metrics["wavelet_loss/total"] = float(total)
         return metrics
 
     def process_band(
@@ -306,7 +287,10 @@ class WaveletLoss(nn.Module):
         weight = base_weight * self.band_level_weights.get(weight_key, self.band_weights[band])
         loss = weight.view(-1, 1, 1, 1) * band_loss
 
-        metrics: Metrics = {f"{band}{i}_band_loss": band_loss.detach().mean().item()}
+        metrics: Metrics = {
+            f"wavelet_loss/band_loss/{band}{i + 1}": band_loss.detach().mean().item(),
+            f"wavelet_loss/weighted_band_loss/{band}{i + 1}": loss.detach().mean().item(),
+        }
 
         return loss, pred, target, metrics
 
@@ -369,7 +353,7 @@ class WaveletLoss(nn.Module):
 
         # METRICS: Calculate all additional metrics
         if self.metrics:
-            metrics.update(self.process_loss_metrics(pattern_losses, pattern_losses, energy_loss=None))
+            metrics.update(self.process_loss_metrics(pattern_losses))
             metrics.update(self.process_latent_metrics(pred))
 
         if reduce:
