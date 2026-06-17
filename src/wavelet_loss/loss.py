@@ -9,11 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from wavelet_transform import (
-    DiscreteWaveletTransform,
-    StationaryWaveletTransform,
-    QuaternionWaveletTransform,
-)
+from wavelet_transform import QuaternionWaveletTransform
 
 
 class LossCallableMSE(Protocol):
@@ -43,6 +39,8 @@ class WaveletLoss(nn.Module):
         wavelet="db4",
         level=3,
         transform_type="dwt",
+        backend: str = "pytorch_wavelets",
+        mode: str = "zero",
         loss_fn: LossCallable = F.mse_loss,
         device=torch.device("cpu"),
         band_level_weights: dict[str, float] | None = None,
@@ -83,28 +81,23 @@ class WaveletLoss(nn.Module):
         self.timestep_intensity = timestep_intensity
         self.normalize_bands = normalize_bands
 
-        # Initialize transform based on type
-        if transform_type == "dwt":
-            self.transform = DiscreteWaveletTransform(wavelet, device)
-        elif transform_type == "swt":  # swt
-            self.transform = StationaryWaveletTransform(wavelet, device)
-        elif transform_type == "qwt":
-            self.transform = QuaternionWaveletTransform(wavelet, device)
+        # Initialize transform via backend factory
+        from wavelet_transform import make_backend
 
-            # Register Hilbert filters as buffers
+        self.backend = backend
+        self.mode = mode
+        self.transform = make_backend(backend, transform_type, wavelet, mode, device)
+
+        if transform_type == "qwt":
             self.register_buffer("hilbert_x", self.transform.hilbert_x)
             self.register_buffer("hilbert_y", self.transform.hilbert_y)
             self.register_buffer("hilbert_xy", self.transform.hilbert_xy)
-
-            # Default weights
             self.component_weights = quaternion_component_weights or {
-                "r": 1.0,  # Real part (standard wavelet)
-                "i": 0.7,  # x-Hilbert (imaginary part)
-                "j": 0.7,  # y-Hilbert (imaginary part)
-                "k": 0.5,  # xy-Hilbert (imaginary part)
+                "r": 1.0,
+                "i": 0.7,
+                "j": 0.7,
+                "k": 0.5,
             }
-        else:
-            raise RuntimeError(f"Invalid transform type {transform_type}")
 
         # Register wavelet filters as module buffers
         self.register_buffer("dec_lo", self.transform.dec_lo.to(device))
@@ -133,6 +126,12 @@ class WaveletLoss(nn.Module):
             loss: Total wavelet loss
             metrics: Wavelet metrics if requested in WaveletLoss(metrics=True)
         """
+        if pred_latent.ndim != 4 or target_latent.ndim != 4:
+            raise ValueError(
+                f"WaveletLoss expects 4D [B, C, H, W] tensors, got "
+                f"pred.ndim={pred_latent.ndim}, target.ndim={target_latent.ndim}."
+            )
+
         if isinstance(self.transform, QuaternionWaveletTransform):
             return self.quaternion_forward(pred_latent, target_latent, timestep)
 
@@ -429,16 +428,16 @@ class WaveletLoss(nn.Module):
     ) -> Tensor:
         """
         Calculate energy matching loss between predicted and target wavelet coefficients.
-        
+
         Args:
             batch_size: Size of the batch
             pred_coeffs: Dictionary of predicted wavelet coefficients
-            target_coeffs: Dictionary of target wavelet coefficients  
+            target_coeffs: Dictionary of target wavelet coefficients
             device: Device to create tensors on
-            
+
         Returns:
             Energy matching loss tensor
-            
+
         Notes:
             - Uses log-scale energy ratio for stability
             - Applies band-specific and level-specific weights
@@ -464,13 +463,13 @@ class WaveletLoss(nn.Module):
     def calculate_raw_energy_metrics(self, pred_stack: Tensor, target_stack: Tensor, band: str, level: int):
         """
         Calculate raw energy metrics for a specific band and level.
-        
+
         Args:
             pred_stack: Predicted wavelet coefficients tensor
             target_stack: Target wavelet coefficients tensor
             band: Wavelet band name (e.g., "lh", "hl", "hh")
             level: Wavelet decomposition level
-            
+
         Returns:
             Dictionary containing raw energy metrics for the band/level
         """
@@ -490,14 +489,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate metrics for cross-scale consistency between adjacent wavelet levels.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing cross-scale consistency metrics
-            
+
         Notes:
             - Compares energy ratios between adjacent scales
             - Uses log-scale differences for stability
@@ -539,14 +538,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate spatial correlation metrics between predicted and target wavelet coefficients.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing correlation metrics for each band and level
-            
+
         Notes:
             - Calculates correlation across spatial dimensions
             - Provides per-level and per-band averaged correlations
@@ -589,14 +588,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate metrics for directional consistency between wavelet bands.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing directional consistency metrics
-            
+
         Notes:
             - Analyzes horizontal vs vertical energy ratios (hl/lh)
             - Analyzes diagonal vs horizontal+vertical energy ratios (hh/(hl+lh))
@@ -650,13 +649,13 @@ class WaveletLoss(nn.Module):
     def calculate_latent_regularity_metrics(self, pred_latents: Tensor) -> dict:
         """
         Calculate metrics for latent space regularity and smoothness.
-        
+
         Args:
             pred_latents: Predicted latent tensor
-            
+
         Returns:
             Dictionary containing latent regularity metrics
-            
+
         Notes:
             - Calculates total variation (TV) for smoothness measurement
             - Provides statistical metrics (mean, std)
@@ -696,14 +695,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate sparsity metrics for wavelet coefficients.
-        
+
         Args:
             coeffs: Dictionary of wavelet coefficients
             reference_coeffs: Optional reference coefficients for relative sparsity
-            
+
         Returns:
             Dictionary containing sparsity metrics
-            
+
         Notes:
             - Uses L1 norm as primary sparsity measure
             - Calculates non-zero ratio (threshold at 0.01)
@@ -744,13 +743,13 @@ class WaveletLoss(nn.Module):
     def smooth_timestep_weight(self, timestep):
         """
         Calculate smooth timestep-based weight using sigmoid transition.
-        
+
         Args:
             timestep: Current diffusion timestep tensor
-            
+
         Returns:
             Smooth weight tensor with sigmoid transition instead of hard cutoff
-            
+
         Notes:
             - Weight decreases as timestep increases (later in denoising process)
             - Uses sigmoid for smooth transition around progress=0.3
@@ -763,13 +762,13 @@ class WaveletLoss(nn.Module):
     def _calculate_effective_ll_threshold(self) -> int | None:
         """
         Calculate the effective LL level threshold.
-        
+
         For positive values, returns the value as-is.
         For negative values, calculates from the end: level + threshold
-        
+
         Returns:
             Effective threshold level, or None if no threshold is set
-            
+
         Examples:
             level=3, threshold=1  -> 1
             level=3, threshold=2  -> 2
@@ -778,7 +777,7 @@ class WaveletLoss(nn.Module):
         """
         if self.ll_level_threshold is None:
             return None
-            
+
         if self.ll_level_threshold > 0:
             return self.ll_level_threshold
         else:
