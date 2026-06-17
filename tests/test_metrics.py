@@ -88,3 +88,40 @@ def test_sparsity_metrics_removed():
     assert not any("sparsity" in k for k in metrics)
     assert not any("l1_norm" in k for k in metrics)
     assert not any("non_zero_ratio" in k for k in metrics)
+
+
+def test_all_metric_keys_are_namespaced():
+    lf = _loss()
+    pred, target = _inputs()
+    _, metrics = lf(pred, target)
+    assert metrics  # non-empty
+    unprefixed = [k for k in metrics if not k.startswith("wavelet_loss/")]
+    assert unprefixed == [], f"unprefixed metric keys: {unprefixed}"
+
+
+def test_correlation_perfect_on_identical_input():
+    lf = _loss()
+    torch.manual_seed(0)
+    target = torch.randn(2, 4, 32, 32)
+    _, metrics = lf(target.clone(), target)
+    assert abs(metrics["wavelet_loss/correlation/lh_avg"] - 1.0) < 1e-4
+    assert abs(metrics["wavelet_loss/correlation/lh1"] - 1.0) < 1e-4
+
+
+def test_structural_metrics_are_scale_invariant():
+    lf = _loss()
+    torch.manual_seed(0)
+    target = torch.randn(2, 4, 32, 32)
+    _, m1 = lf(target.clone(), target)
+    _, m5 = lf(5 * target, 5 * target)
+    # correlation and directional ratios depend on structure, not amplitude
+    assert abs(m1["wavelet_loss/correlation/lh1"] - m5["wavelet_loss/correlation/lh1"]) < 1e-4
+    assert abs(m1["wavelet_loss/directional/avg_hv_diff"] - m5["wavelet_loss/directional/avg_hv_diff"]) < 1e-4
+
+
+def test_latent_metrics_namespaced():
+    lf = _loss()
+    pred, target = _inputs()
+    _, metrics = lf(pred, target)
+    for suffix in ["tv_x", "tv_y", "tv_total", "std", "mean", "std_from_normal"]:
+        assert f"wavelet_loss/latent/{suffix}" in metrics

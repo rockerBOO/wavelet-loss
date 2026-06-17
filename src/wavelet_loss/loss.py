@@ -408,15 +408,14 @@ class WaveletLoss(nn.Module):
                 log_ratio_diff = abs(math.log(pred_ratio + 1e-8) - math.log(target_ratio + 1e-8))
 
                 # Store individual metrics
-                metrics[f"{band}{i}_to_{i + 1}_pred_scale_ratio"] = pred_ratio
-                metrics[f"{band}{i}_to_{i + 1}_target_scale_ratio"] = target_ratio
-                metrics[f"{band}{i}_to_{i + 1}_scale_log_diff"] = log_ratio_diff
+                metrics[f"wavelet_loss/cross_scale/{band}{i}_to_{i + 1}_pred_ratio"] = pred_ratio
+                metrics[f"wavelet_loss/cross_scale/{band}{i}_to_{i + 1}_target_ratio"] = target_ratio
+                metrics[f"wavelet_loss/cross_scale/{band}{i}_to_{i + 1}_log_diff"] = log_ratio_diff
 
         # Calculate average difference across all bands and scales
-        if metrics:  # Check if dictionary is not empty
-            metrics["avg_cross_scale_difference"] = sum(
-                v for k, v in metrics.items() if k.endswith("scale_log_diff")
-            ) / len([k for k in metrics if k.endswith("scale_log_diff")])
+        log_diffs = [v for k, v in metrics.items() if k.endswith("_log_diff")]
+        if log_diffs:
+            metrics["wavelet_loss/cross_scale/avg_difference"] = sum(log_diffs) / len(log_diffs)
 
         return metrics
 
@@ -463,10 +462,10 @@ class WaveletLoss(nn.Module):
                 correlation = numerator / denom  # [B, C]
                 avg_corr = correlation.mean().item()
 
-                metrics[f"{band}{i + 1}_spatial_correlation"] = avg_corr
+                metrics[f"wavelet_loss/correlation/{band}{i + 1}"] = avg_corr
                 band_correlations.append(avg_corr)
 
-            metrics[f"{band}_avg_correlation"] = np.mean(band_correlations)
+            metrics[f"wavelet_loss/correlation/{band}_avg"] = np.mean(band_correlations)
 
         return metrics
 
@@ -516,22 +515,22 @@ class WaveletLoss(nn.Module):
             diag_log_diff = abs(math.log(pred_d_ratio + 1e-8) - math.log(target_d_ratio + 1e-8))
 
             # Store metrics
-            metrics[f"level{i}_horiz_vert_pred_ratio"] = pred_hv_ratio
-            metrics[f"level{i}_horiz_vert_target_ratio"] = target_hv_ratio
-            metrics[f"level{i}_horiz_vert_log_diff"] = hv_log_diff
+            metrics[f"wavelet_loss/directional/level{i}_hv_pred_ratio"] = pred_hv_ratio
+            metrics[f"wavelet_loss/directional/level{i}_hv_target_ratio"] = target_hv_ratio
+            metrics[f"wavelet_loss/directional/level{i}_hv_log_diff"] = hv_log_diff
 
-            metrics[f"level{i}_diag_ratio_pred"] = pred_d_ratio
-            metrics[f"level{i}_diag_ratio_target"] = target_d_ratio
-            metrics[f"level{i}_diag_ratio_log_diff"] = diag_log_diff
+            metrics[f"wavelet_loss/directional/level{i}_diag_pred_ratio"] = pred_d_ratio
+            metrics[f"wavelet_loss/directional/level{i}_diag_target_ratio"] = target_d_ratio
+            metrics[f"wavelet_loss/directional/level{i}_diag_log_diff"] = diag_log_diff
 
             hv_diffs.append(hv_log_diff)
             diag_diffs.append(diag_log_diff)
 
         # Average metrics
         if hv_diffs:
-            metrics["avg_horiz_vert_diff"] = sum(hv_diffs) / len(hv_diffs)
+            metrics["wavelet_loss/directional/avg_hv_diff"] = sum(hv_diffs) / len(hv_diffs)
         if diag_diffs:
-            metrics["avg_diag_ratio_diff"] = sum(diag_diffs) / len(diag_diffs)
+            metrics["wavelet_loss/directional/avg_diag_diff"] = sum(diag_diffs) / len(diag_diffs)
 
         return metrics
 
@@ -568,12 +567,12 @@ class WaveletLoss(nn.Module):
         std_diff = abs(std_value - 1.0)
 
         # Store metrics
-        metrics["latent_tv_x"] = tv_x
-        metrics["latent_tv_y"] = tv_y
-        metrics["latent_tv_total"] = tv_total
-        metrics["latent_std"] = std_value
-        metrics["latent_mean"] = mean_value
-        metrics["latent_std_from_normal"] = std_diff
+        metrics["wavelet_loss/latent/tv_x"] = tv_x
+        metrics["wavelet_loss/latent/tv_y"] = tv_y
+        metrics["wavelet_loss/latent/tv_total"] = tv_total
+        metrics["wavelet_loss/latent/std"] = std_value
+        metrics["wavelet_loss/latent/mean"] = mean_value
+        metrics["wavelet_loss/latent/std_from_normal"] = std_diff
 
         return metrics
 
