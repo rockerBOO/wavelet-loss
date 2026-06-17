@@ -1,8 +1,9 @@
 # tests/test_backends.py
 import numpy as np
 import pywt
+import pytest
 import torch
-from wavelet_transform.backends import CustomDWTBackend, PytorchWaveletsBackend
+from wavelet_transform.backends import CustomDWTBackend, PytorchWaveletsBackend, make_backend
 
 
 def _rel(a, b):
@@ -57,7 +58,30 @@ def test_custom_dwt_matches_pytorch_wavelets_backend():
 
 
 def test_custom_dwt_rejects_unsupported_mode():
-    import pytest
-
     with pytest.raises(NotImplementedError):
         CustomDWTBackend(wavelet="db4", mode="symmetric")
+
+
+def test_make_backend_dwt_default_is_pytorch_wavelets():
+    b = make_backend("pytorch_wavelets", "dwt", "db4", "zero", torch.device("cpu"))
+    assert b.__class__.__name__ == "PytorchWaveletsBackend"
+
+
+def test_make_backend_dwt_custom():
+    b = make_backend("custom", "dwt", "db4", "zero", torch.device("cpu"))
+    assert b.__class__.__name__ == "CustomDWTBackend"
+
+
+def test_make_backend_swt_is_always_custom_regardless_of_backend_flag():
+    b = make_backend("pytorch_wavelets", "swt", "db4", "zero", torch.device("cpu"))
+    assert b.__class__.__name__ == "StationaryWaveletTransform"
+
+
+def test_make_backend_qwt_warns_experimental():
+    with pytest.warns(UserWarning, match="experimental"):
+        make_backend("pytorch_wavelets", "qwt", "db4", "zero", torch.device("cpu"))
+
+
+def test_make_backend_rejects_unknown_transform_type():
+    with pytest.raises(ValueError, match="transform_type"):
+        make_backend("custom", "bogus", "db4", "zero", torch.device("cpu"))

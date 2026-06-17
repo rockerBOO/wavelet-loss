@@ -1,4 +1,5 @@
 # src/wavelet_transform/backends.py
+import warnings
 from typing import Protocol
 
 import numpy as np
@@ -6,6 +7,8 @@ import pywt
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+
+from .transform import QuaternionWaveletTransform, StationaryWaveletTransform
 
 
 class WaveletBackend(Protocol):
@@ -104,3 +107,24 @@ class CustomDWTBackend:
             bands["hl"].append(hl)
             bands["hh"].append(hh)
         return bands
+
+
+def make_backend(backend: str, transform_type: str, wavelet: str, mode: str, device):
+    """Build a wavelet backend. `backend` selects the DWT implementation; SWT and
+    QWT are always custom (no library equivalent in pytorch_wavelets 1.3.0)."""
+    if transform_type == "dwt":
+        if backend == "pytorch_wavelets":
+            return PytorchWaveletsBackend(wavelet=wavelet, mode=mode, device=device)
+        if backend == "custom":
+            return CustomDWTBackend(wavelet=wavelet, mode=mode, device=device)
+        raise ValueError(f"Unknown backend {backend!r}; expected 'pytorch_wavelets' or 'custom'.")
+    if transform_type == "swt":
+        return StationaryWaveletTransform(wavelet=wavelet, device=device)
+    if transform_type == "qwt":
+        warnings.warn(
+            "qwt is experimental and not validated against a reference transform.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return QuaternionWaveletTransform(wavelet=wavelet, device=device)
+    raise ValueError(f"Unknown transform_type {transform_type!r}; expected 'dwt', 'swt', or 'qwt'.")
