@@ -48,11 +48,8 @@ class WaveletLoss(nn.Module):
         quaternion_component_weights: dict[str, float] | None = None,
         ll_level_threshold: int | None = -1,
         metrics: bool = False,
-        energy_ratio: float = 0.0,
-        energy_scale_factor: float = 0.01,
         normalize_bands: bool = False,
         max_timestep: float = 1000,
-        timestep_intensity: float = 0.5,
     ):
         """
 
@@ -73,12 +70,9 @@ class WaveletLoss(nn.Module):
         self.transform_type = transform_type
         self.loss_fn = loss_fn
         self.device = device
-        self.ll_level_threshold: int | None = ll_level_threshold if ll_level_threshold is not None else None
+        self.ll_level_threshold: int | None = ll_level_threshold
         self.metrics = metrics
-        self.energy_ratio = energy_ratio
-        self.energy_scale_factor = energy_scale_factor
         self.max_timestep = max_timestep
-        self.timestep_intensity = timestep_intensity
         self.normalize_bands = normalize_bands
 
         # Initialize transform via backend factory
@@ -162,26 +156,13 @@ class WaveletLoss(nn.Module):
 
                 pattern_losses.append(band_loss)
 
-        # TODO: need to update this to work with a list of losses
-        # If we are balancing the energy loss with the pattern loss
-        # if self.energy_ratio > 0.0:
-        #     energy_loss = self.energy_matching_loss(batch_size, pred_coeffs, target_coeffs, device)
-        #
-        #     loss = self.energy_ratio * (self.energy_scale_factor * energy_loss)
-        #     losses: list[Tensor] = []
-        #
-        #     for pattern_loss in pattern_losses:
-        #         losses.append((1 - self.energy_ratio) * (self.energy_scale_factor * pattern_loss))
-        # else:
-        #     energy_loss = None
-        energy_loss = None
         losses = pattern_losses
 
         # METRICS: Calculate all additional metrics (no gradients needed)
         if self.metrics:
             with torch.no_grad():
                 metrics.update(self.process_coeff_metrics(pred_coeffs, target_coeffs))
-                metrics.update(self.process_loss_metrics(pattern_losses, losses, energy_loss))
+                metrics.update(self.process_loss_metrics(pattern_losses, losses, energy_loss=None))
                 metrics.update(self.process_latent_metrics(pred_latent))
 
         if reduce:
@@ -195,18 +176,6 @@ class WaveletLoss(nn.Module):
         target_coeffs: dict[str, list[Tensor]],
     ) -> Metrics:
         metrics: Metrics = {}
-        # # Raw energy metrics
-        # for band in ["lh", "hl", "hh"]:
-        #     for i in range(1, self.level + 1):
-        #         pred_stack = pred_coeffs[band][i - 1]
-        #         target_stack = target_coeffs[band][i - 1]
-        #
-        #         metrics[f"{band}{i}_raw_pred_energy"] = torch.mean(pred_stack**2).item()
-        #         metrics[f"{band}{i}_raw_target_energy"] = torch.mean(target_stack**2).item()
-        #         metrics[f"{band}{i}_energy_ratio"] = (
-        #             torch.mean(pred_stack**2) / (torch.mean(target_stack**2) + 1e-8)
-        #         ).item()
-
         metrics.update(self.calculate_correlation_metrics(pred_coeffs, target_coeffs))
         metrics.update(self.calculate_avg_high_frequency(pred_coeffs, target_coeffs))
         metrics.update(self.calculate_cross_scale_consistency_metrics(pred_coeffs, target_coeffs))
@@ -427,47 +396,6 @@ class WaveletLoss(nn.Module):
                 padded_tensors.append(tensor)
 
         return padded_tensors
-
-    @torch.no_grad()
-    def energy_matching_loss(
-        self,
-        batch_size: int,
-        pred_coeffs: dict[str, list[Tensor]],
-        target_coeffs: dict[str, list[Tensor]],
-        device: torch.device,
-    ) -> Tensor:
-        """
-        Calculate energy matching loss between predicted and target wavelet coefficients.
-
-        Args:
-            batch_size: Size of the batch
-            pred_coeffs: Dictionary of predicted wavelet coefficients
-            target_coeffs: Dictionary of target wavelet coefficients
-            device: Device to create tensors on
-
-        Returns:
-            Energy matching loss tensor
-
-        Notes:
-            - Uses log-scale energy ratio for stability
-            - Applies band-specific and level-specific weights
-            - Only considers high-frequency bands (lh, hl, hh)
-        """
-        energy_loss = torch.zeros(batch_size, device=device)
-        for band in ["lh", "hl", "hh"]:
-            for i in range(1, self.level + 1):
-                weight_key = f"{band}{i}"
-                # Calculate band energies
-                pred_energy = torch.mean(pred_coeffs[band][i - 1] ** 2)
-                target_energy = torch.mean(target_coeffs[band][i - 1] ** 2)
-
-                # Log-scale energy ratio loss (more stable than direct ratio)
-                ratio_loss = torch.abs(torch.log(pred_energy + 1e-8) - torch.log(target_energy + 1e-8))
-
-                weight = self.band_level_weights.get(weight_key, self.band_weights[band])
-                energy_loss += weight * ratio_loss
-
-        return energy_loss
 
     @torch.no_grad()
     def calculate_raw_energy_metrics(self, pred_stack: Tensor, target_stack: Tensor, band: str, level: int):

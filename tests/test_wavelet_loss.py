@@ -58,7 +58,6 @@ class TestWaveletLoss:
             transform_type="dwt",
             device=device,
             max_timestep=1000,
-            timestep_intensity=0.5,
         )
 
         # Test different timestep scenarios
