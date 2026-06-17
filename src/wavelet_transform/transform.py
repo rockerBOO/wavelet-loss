@@ -158,6 +158,7 @@ class StationaryWaveletTransform(WaveletTransform):
             lof = self._upsample(lo0, 2**j)
             hif = self._upsample(hi0, 2**j)
             k = lof.numel()
+            # Roll to center the à-trous filter: use ORIGINAL filter length k0, scaled by 2**j (NOT the upsampled length).
             shift = -(k0 // 2) * (2**j)
             xbc = ll.reshape(b * c, 1, h, w)
             lo_r = self._cdim(xbc, lof, 2, k, shift)

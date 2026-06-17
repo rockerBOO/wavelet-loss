@@ -1,3 +1,4 @@
+import pytest
 import torch
 from wavelet_loss import WaveletLoss
 
@@ -22,3 +23,23 @@ def test_reduce_false_returns_list():
     losses, _ = lf(pred, target, reduce=False)
     assert isinstance(losses, list)
     assert all(torch.is_tensor(t) for t in losses)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"transform_type": "dwt", "backend": "custom"},
+        {"transform_type": "swt"},
+        {"transform_type": "qwt"},
+    ],
+)
+def test_reduce_true_backprops_across_transforms(kwargs):
+    torch.manual_seed(0)
+    pred = torch.randn(1, 2, 32, 32, requires_grad=True)
+    target = torch.randn(1, 2, 32, 32)
+    lf = WaveletLoss(level=2, **kwargs)
+    loss, _ = lf(pred, target)
+    assert loss.ndim == 0 and loss.requires_grad
+    loss.backward()
+    assert torch.isfinite(pred.grad).all()
+    assert pred.grad.abs().sum() > 0
