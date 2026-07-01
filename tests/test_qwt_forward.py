@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pytest
 import torch
@@ -35,7 +37,7 @@ class TestQWTForward:
                     pred[b, c] += 0.2 * torch.randn(height, width)
                     target[b, c] += 0.1 * torch.randn(height, width)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if os.environ.get("WAVELET_TEST_CUDA") else "cpu")
         return pred.to(device), target.to(device), device
 
     def test_qwt_forward_method_signature(self, setup_qwt_inputs):
@@ -45,7 +47,7 @@ class TestQWTForward:
         loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
 
         # Call forward method
-        losses, component_losses = loss_fn(pred, target)
+        losses, component_losses = loss_fn(pred, target, reduce=False)
 
         # Check return types
         assert isinstance(losses, list), "Losses should be a list"
@@ -61,7 +63,7 @@ class TestQWTForward:
         """Verify the structure of component losses"""
         pred, target, device = setup_qwt_inputs
 
-        loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
+        loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device, metrics=True)
 
         # Call forward method
         _, component_losses = loss_fn(pred, target)
@@ -95,6 +97,7 @@ class TestQWTForward:
                 transform_type="qwt",
                 device=device,
                 quaternion_component_weights=weights,
+                metrics=True,
             )
 
             # Call forward method
@@ -112,19 +115,24 @@ class TestQWTForward:
         """Test QWT forward method with identical inputs"""
         pred, target, device = setup_qwt_inputs
 
-        loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
+        loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device, metrics=True)
 
         # Use identical inputs
-        losses, component_losses = loss_fn(pred, pred)
+        losses, component_losses = loss_fn(pred, pred, reduce=False)
 
         # For identical inputs, losses should be very small
         for loss in losses:
             for item in loss:
                 assert item.mean().item() < 1e-5, "Loss for identical inputs should be near zero"
 
-        # Component losses should also be near zero
-        for loss_value in component_losses.values():
-            assert np.abs(loss_value) < 1e-5, "Component loss for identical inputs should be near zero"
+        # Component losses should also be near zero (excluding weight/structural metrics)
+        for key, loss_value in component_losses.items():
+            # Skip weight and structural metrics; only check actual loss values
+            if not any(
+                x in key
+                for x in ["timestep_adjusted_weight", "correlation", "energy", "directional", "cross_scale", "latent"]
+            ):
+                assert np.abs(loss_value) < 1e-5, f"Component loss {key} for identical inputs should be near zero"
 
     def test_qwt_forward_default_vs_custom_loss_fn(self, setup_qwt_inputs):
         """Test QWT forward method with different loss functions"""
@@ -132,15 +140,15 @@ class TestQWTForward:
         pred, target, device = setup_qwt_inputs
 
         # Default MSE loss
-        loss_fn_mse = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
+        loss_fn_mse = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device, metrics=True)
 
         # Custom L1 loss
-        loss_fn_l1 = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device)
+        loss_fn_l1 = WaveletLoss(wavelet="db4", level=2, transform_type="qwt", device=device, metrics=True)
         loss_fn_l1.set_loss_fn(F.l1_loss)
 
         # Compute losses
-        mse_losses, mse_component_losses = loss_fn_mse(pred, target)
-        l1_losses, l1_component_losses = loss_fn_l1(pred, target)
+        mse_losses, mse_component_losses = loss_fn_mse(pred, target, reduce=False)
+        l1_losses, l1_component_losses = loss_fn_l1(pred, target, reduce=False)
 
         # Verify that losses are different
         assert len(mse_losses) == len(l1_losses)

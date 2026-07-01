@@ -1,13 +1,23 @@
 [project]
 name = "wavelet-loss"
 version = "0.1.0"
-description = "Add your description here"
+authors = [
+  { name="Dave Lage (rockerBOO)", email="rockerboo@gmail.com" },
+]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+description = "Wavelet-based loss calculations"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "pytorch-wavelets>=1.3.0",
     "pywavelets>=1.8.0",
     "torch>=2.0.0",
 ]
+[project.urls]
+Homepage = "https://github.com/rockerBOO/wavelet-loss"
+Issues = "https://github.com/rockerBOO/wavelet-loss/issues"
+Repository = "https://github.com/rockerBOO/wavelet-loss.git"
 
 [project.optional-dependencies]
 visualize = [
@@ -19,7 +29,7 @@ image = [
 ]
 vae = [
     "accelerate>=1.8.1",
-    "diffusers>=0.34.0",
+    "diffusers",
 ]
 
 [tool.ruff]

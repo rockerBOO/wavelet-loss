@@ -16,14 +16,14 @@ pip install git+https://github.com/rockerBOO/wavelet-loss.git
 import torch
 from wavelet_loss import WaveletLoss
 
-# Create a loss function
-loss_fn = WaveletLoss()
+# Frequency-aware loss for VAE latents [B, C, H, W]
+loss_fn = WaveletLoss(wavelet="db4", level=2, transform_type="dwt")
 
-# Example usage in a training loop
-prediction = torch.randn(10, 1)
-target = torch.randn(10, 1)
+prediction = torch.randn(2, 4, 32, 32, requires_grad=True)
+target = torch.randn(2, 4, 32, 32)
 
-loss = loss_fn(prediction, target)
+loss, metrics = loss_fn(prediction, target)  # scalar loss (reduce=True default)
+loss.backward()
 ```
 
 ## Features

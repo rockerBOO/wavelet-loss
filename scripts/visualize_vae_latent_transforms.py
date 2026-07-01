@@ -5,6 +5,7 @@ Supports DWT, SWT, and QWT transforms on VAE-encoded representations.
 """
 
 from pathlib import Path
+from diffusers.models.autoencoders import AutoencoderKLQwenImage
 import argparse
 import numpy as np
 import torch
@@ -294,6 +295,8 @@ def main():
         help="Output image formats (default: png)",
     )
 
+    parser.add_argument("--subfolder", help="Subfolder on hugging face with the VAE")
+
     # Additional arguments
     parser.add_argument("--grayscale", action="store_true", help="Convert image to grayscale")
     parser.add_argument(
@@ -327,7 +330,7 @@ def main():
 
     # Load VAE model and processor
     print(f"Loading VAE model: {args.vae_model}")
-    vae, processor = load_vae_model(args.vae_model)
+    vae, processor = load_vae_model(args.vae_model, args.subfolder)
     vae = vae.to(device)
     vae.eval()
 
@@ -337,8 +340,16 @@ def main():
     # Store original image shape for aspect ratio calculation
     original_aspect = img.shape[1] / img.shape[0]  # width/height
 
+    if isinstance(vae, AutoencoderKLQwenImage):
+        img_tensor = img_tensor.unsqueeze(2)
+
     # Encode image to latent space
     latent, reconstructed, img_tensor_display = encode_image_to_latent(vae, processor, img_tensor, device)
+
+    if isinstance(vae, AutoencoderKLQwenImage):
+        latent = latent.squeeze(2)
+        img_tensor_display = img_tensor_display.squeeze(2)
+        reconstructed = reconstructed.squeeze(2)
 
     # Prepare transforms dictionary based on user selection
     available_transforms = {
@@ -346,6 +357,8 @@ def main():
         "swt": ("SWT (Stationary Wavelet Transform)", StationaryWaveletTransform),
         "qwt": ("QWT (Quaternion Wavelet Transform)", QuaternionWaveletTransform),
     }
+
+    print(latent.shape)
 
     # Filter selected transforms
     selected_transforms = {
@@ -363,6 +376,8 @@ def main():
 
         # Generate output paths
         output_paths = [Path(output_dir / f"{base_filename}.{fmt}") for fmt in args.output_formats]
+
+        print(img_tensor_display.shape)
 
         # Create visualization
         visualize_vae_latent_transforms(

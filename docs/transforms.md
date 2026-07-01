@@ -14,11 +14,12 @@
   - Signal denoising
   - Feature extraction in machine learning
 - Decomposition Process:
-  - Breaks down 2D images into:
-    - Low-frequency (LL)
-    - Horizontal high-frequency (HL)
-    - Vertical high-frequency (LH)
-    - Diagonal high-frequency (HH) components
+  - Breaks down 2D images into (filters applied along H first, then W):
+    - Low-frequency (LL) — lo·H, lo·W
+    - Horizontal high-frequency (LH) — hi·H, lo·W (pywt `cH`)
+    - Vertical high-frequency (HL) — lo·H, hi·W (pywt `cV`)
+    - Diagonal high-frequency (HH) — hi·H, hi·W (pywt `cD`)
+  - See `docs/transform-conventions.md` for the exact band/filter convention.
 - Typical Wavelet Families:
   - Daubechies (most common)
   - Coiflet

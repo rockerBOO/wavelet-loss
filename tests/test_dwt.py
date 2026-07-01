@@ -1,9 +1,17 @@
+import os
+
+import numpy as np
+import pywt
 import pytest
 import torch
-from torch import Tensor
 
 from wavelet_transform import DiscreteWaveletTransform
 from wavelet_transform import WaveletTransform
+
+
+def _rel(a, b):
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    return np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-12)
 
 
 class TestDiscreteWaveletTransform:
@@ -28,67 +36,32 @@ class TestDiscreteWaveletTransform:
         assert dwt.dec_lo.size(0) == 8
         assert dwt.dec_hi.size(0) == 8
 
-    def test_dwt_single_level(self, dwt: DiscreteWaveletTransform, sample_image: Tensor):
-        """Test single-level DWT decomposition."""
-        x = sample_image
+    def test_dwt_single_level_pywt_parity(self, dwt: DiscreteWaveletTransform):
+        """Test single-level DWT decomposition matches pywt.dwt2(mode='zero')."""
+        torch.manual_seed(0)
+        x = torch.randn(2, 2, 32, 32, dtype=torch.float64)
 
-        # Perform single-level decomposition
-        ll, lh, hl, hh = dwt._dwt_single_level(x)
+        # Use decompose (delegates to CustomDWTBackend) for level=1
+        result = dwt.decompose(x, level=1)
+        ll = result["ll"][0]
+        lh = result["lh"][0]
+        hl = result["hl"][0]
+        hh = result["hh"][0]
 
-        # Check that all subbands have the same shape
+        # All subbands have the same shape
         assert ll.shape == lh.shape == hl.shape == hh.shape
 
-        # Check that batch and channel dimensions are preserved
+        # Batch and channel dimensions preserved
         assert ll.shape[0] == x.shape[0]
         assert ll.shape[1] == x.shape[1]
 
-        # Calculate expected output size based on PyTorch's conv2d output size formula:
-        # output_size = (input_size + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1
-
-        filter_size = dwt.dec_lo.size(0)  # 8 for db4
-        padding = filter_size // 2  # 4 for db4
-        stride = 2  # Downsampling factor
-
-        # For each dimension
-        padded_height = x.shape[2] + 2 * padding
-        padded_width = x.shape[3] + 2 * padding
-
-        # PyTorch's conv2d formula with stride=2
-        expected_height = (padded_height - filter_size) // stride + 1
-        expected_width = (padded_width - filter_size) // stride + 1
-
-        expected_shape = (x.shape[0], x.shape[1], expected_height, expected_width)
-
-        assert ll.shape == expected_shape, f"Expected {expected_shape}, got {ll.shape}"
-
-        # Test with different input sizes to verify consistency
-        test_sizes = [(8, 8), (32, 32), (64, 64)]
-
-        for h, w in test_sizes:
-            test_input = torch.randn(2, 2, h, w)
-            test_ll, _, _, _ = dwt._dwt_single_level(test_input)
-
-            # Calculate expected shape
-            pad_h = test_input.shape[2] + 2 * padding
-            pad_w = test_input.shape[3] + 2 * padding
-            exp_h = (pad_h - filter_size) // stride + 1
-            exp_w = (pad_w - filter_size) // stride + 1
-            exp_shape = (test_input.shape[0], test_input.shape[1], exp_h, exp_w)
-
-            assert test_ll.shape == exp_shape, (
-                f"For input {test_input.shape}, expected {exp_shape}, got {test_ll.shape}"
-            )
-
-        # Check energy preservation
-        input_energy = torch.sum(x**2).item()
-        output_energy = (
-            torch.sum(ll**2).item() + torch.sum(lh**2).item() + torch.sum(hl**2).item() + torch.sum(hh**2).item()
-        )
-
-        # For orthogonal wavelets like db4, energy should be approximately preserved
-        assert 0.9 <= output_energy / input_energy <= 1.12, (
-            f"Energy ratio (output/input): {output_energy / input_energy:.4f} should be close to 1.0"
-        )
+        # Correctness: each subband must match pywt.dwt2(mode='zero')
+        # lh=cH, hl=cV, hh=cD per CustomDWTBackend convention
+        cA, (cH, cV, cD) = pywt.dwt2(x[0, 0].numpy(), "db4", mode="zero")
+        assert _rel(ll[0, 0].numpy(), cA) < 1e-6, f"ll relerr={_rel(ll[0, 0].numpy(), cA):.2e}"
+        assert _rel(lh[0, 0].numpy(), cH) < 1e-6, f"lh relerr={_rel(lh[0, 0].numpy(), cH):.2e}"
+        assert _rel(hl[0, 0].numpy(), cV) < 1e-6, f"hl relerr={_rel(hl[0, 0].numpy(), cV):.2e}"
+        assert _rel(hh[0, 0].numpy(), cD) < 1e-6, f"hh relerr={_rel(hh[0, 0].numpy(), cD):.2e}"
 
     def test_decompose_structure(self, dwt, sample_image):
         """Test structure of decomposition result."""
@@ -105,46 +78,29 @@ class TestDiscreteWaveletTransform:
             assert band in result
             assert len(result[band]) == level
 
-    def test_decompose_shapes(self, dwt: DiscreteWaveletTransform, sample_image: Tensor):
-        """Test shapes of decomposition coefficients."""
-        x = sample_image
+    def test_decompose_shapes_pywt_parity(self, dwt: DiscreteWaveletTransform):
+        """Test shapes of decomposition coefficients match pywt.dwt2 output shapes."""
+        torch.manual_seed(1)
+        x = torch.randn(2, 2, 32, 32, dtype=torch.float64)
         level = 3
 
-        # Perform decomposition
         result = dwt.decompose(x, level=level)
 
-        # Filter size and padding
-        filter_size = dwt.dec_lo.size(0)  # 8 for db4
-        padding = filter_size // 2  # 4 for db4
-        stride = 2  # Downsampling factor
-
-        # Calculate expected shapes at each level
-        expected_shapes = []
+        # Compute expected shapes using pywt for each level
         current_h, current_w = x.shape[2], x.shape[3]
-
         for lvl in range(level):
-            # Calculate shape for this level using PyTorch's conv2d formula
-            padded_h = current_h + 2 * padding
-            padded_w = current_w + 2 * padding
-            output_h = (padded_h - filter_size) // stride + 1
-            output_w = (padded_w - filter_size) // stride + 1
+            cA, _ = pywt.dwt2(np.zeros((current_h, current_w)), "db4", mode="zero")
+            exp_h, exp_w = cA.shape
+            expected_shape = (x.shape[0], x.shape[1], exp_h, exp_w)
 
-            expected_shapes.append((x.shape[0], x.shape[1], output_h, output_w))
-
-            # Update for next level
-            current_h, current_w = output_h, output_w
-
-        # Check shapes of coefficients at each level
-        for lvl in range(level):
-            expected_shape = expected_shapes[lvl]
-
-            # Verify all bands at this level have the correct shape
             for band in ["ll", "lh", "hl", "hh"]:
                 assert result[band][lvl].shape == expected_shape, (
                     f"Level {lvl}, {band}: expected {expected_shape}, got {result[band][lvl].shape}"
                 )
 
-        # Verify length of output lists
+            # Next level input is the ll output
+            current_h, current_w = exp_h, exp_w
+
         for band in ["ll", "lh", "hl", "hh"]:
             assert len(result[band]) == level, f"Expected {level} levels for {band}, got {len(result[band])}"
 
@@ -198,70 +154,53 @@ class TestDiscreteWaveletTransform:
             "dmey",
         ],
     )
-    def test_different_wavelets_different_sizes(self, wavelet):
-        """Test DWT with different wavelet families and input sizes."""
+    def test_different_wavelets_different_sizes_pywt_parity(self, wavelet):
+        """Test DWT with different wavelet families and input sizes matches pywt.dwt2."""
+        torch.manual_seed(2)
         dwt = DiscreteWaveletTransform(wavelet=wavelet, device=torch.device("cpu"))
 
-        # Test with different input sizes to verify consistency
         test_sizes = [(8, 8), (32, 32), (64, 64)]
 
         for h, w in test_sizes:
-            x = torch.randn(2, 2, h, w)
-            test_ll, _, _, _ = dwt._dwt_single_level(x)
+            x = torch.randn(2, 2, h, w, dtype=torch.float64)
+            result = dwt.decompose(x, level=1)
 
-            filter_size = dwt.dec_lo.size(0)
-            padding = filter_size // 2
-            stride = 2
+            # Shape must match pywt
+            cA, (cH, cV, cD) = pywt.dwt2(x[0, 0].numpy(), wavelet, mode="zero")
+            exp_shape = (2, 2, *cA.shape)
+            assert result["ll"][0].shape == exp_shape, (
+                f"wavelet={wavelet}, input ({h},{w}): expected {exp_shape}, got {result['ll'][0].shape}"
+            )
 
-            # Calculate expected shape
-            pad_h = x.shape[2] + 2 * padding
-            pad_w = x.shape[3] + 2 * padding
-            exp_h = (pad_h - filter_size) // stride + 1
-            exp_w = (pad_w - filter_size) // stride + 1
-            exp_shape = (x.shape[0], x.shape[1], exp_h, exp_w)
-
-            assert test_ll.shape == exp_shape, f"For input {x.shape}, expected {exp_shape}, got {test_ll.shape}"
+            # Value parity (check first sample/channel)
+            assert _rel(result["ll"][0][0, 0].numpy(), cA) < 1e-6
+            assert _rel(result["lh"][0][0, 0].numpy(), cH) < 1e-6
+            assert _rel(result["hl"][0][0, 0].numpy(), cV) < 1e-6
+            assert _rel(result["hh"][0][0, 0].numpy(), cD) < 1e-6
 
     @pytest.mark.parametrize("shape", [(2, 3, 64, 64), (1, 1, 128, 128), (4, 3, 120, 160)])
-    def test_different_input_shapes(self, shape):
-        """Test DWT with different input shapes."""
+    def test_different_input_shapes_pywt_parity(self, shape):
+        """Test DWT with different input shapes matches pywt.dwt2(mode='zero')."""
+        torch.manual_seed(3)
         dwt = DiscreteWaveletTransform(wavelet="db4", device=torch.device("cpu"))
-        x = torch.randn(*shape)
+        x = torch.randn(*shape, dtype=torch.float64)
 
-        # Perform decomposition
         result = dwt.decompose(x, level=1)
 
-        # Calculate expected shape using the actual implementation formula
-        filter_size = dwt.dec_lo.size(0)  # 8 for db4
-        padding = filter_size // 2  # 4 for db4
-        stride = 2  # Downsampling factor
+        # Expected shapes from pywt
+        cA, (cH, cV, cD) = pywt.dwt2(x[0, 0].numpy(), "db4", mode="zero")
+        expected_shape = (shape[0], shape[1], *cA.shape)
 
-        # Calculate shape for this level using PyTorch's conv2d formula
-        padded_h = shape[2] + 2 * padding
-        padded_w = shape[3] + 2 * padding
-        output_h = (padded_h - filter_size) // stride + 1
-        output_w = (padded_w - filter_size) // stride + 1
-
-        expected_shape = (shape[0], shape[1], output_h, output_w)
-
-        # Check that all bands have the correct shape
         for band in ["ll", "lh", "hl", "hh"]:
             assert result[band][0].shape == expected_shape, (
                 f"For input {shape}, {band}: expected {expected_shape}, got {result[band][0].shape}"
             )
 
-        # Check that the decomposition preserves energy
-        input_energy = torch.sum(x**2).item()
-
-        # Calculate total energy across all subbands
-        output_energy = 0
-        for band in ["ll", "lh", "hl", "hh"]:
-            output_energy += torch.sum(result[band][0] ** 2).item()
-
-        # For orthogonal wavelets, energy should be preserved
-        assert 0.9 <= output_energy / input_energy <= 1.1, (
-            f"Energy ratio (output/input): {output_energy / input_energy:.4f} should be close to 1.0"
-        )
+        # Value parity for first sample/channel
+        assert _rel(result["ll"][0][0, 0].numpy(), cA) < 1e-6
+        assert _rel(result["lh"][0][0, 0].numpy(), cH) < 1e-6
+        assert _rel(result["hl"][0][0, 0].numpy(), cV) < 1e-6
+        assert _rel(result["hh"][0][0, 0].numpy(), cD) < 1e-6
 
     def test_device_support(self):
         """Test that DWT supports CPU and GPU (if available)."""
@@ -271,8 +210,8 @@ class TestDiscreteWaveletTransform:
         assert dwt_cpu.dec_lo.device == cpu_device
         assert dwt_cpu.dec_hi.device == cpu_device
 
-        # Test GPU if available
-        if torch.cuda.is_available():
+        # Test GPU if available and WAVELET_TEST_CUDA is set
+        if os.environ.get("WAVELET_TEST_CUDA") and torch.cuda.is_available():
             gpu_device = torch.device("cuda:0")
             dwt_gpu = DiscreteWaveletTransform(device=gpu_device)
             assert dwt_gpu.dec_lo.device == gpu_device

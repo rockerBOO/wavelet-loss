@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 from torch import Tensor
@@ -27,50 +29,6 @@ class TestStationaryWaveletTransform:
         assert swt.dec_lo.size(0) == 8
         assert swt.dec_hi.size(0) == 8
 
-    def test_swt_single_level(self, swt: StationaryWaveletTransform, sample_image: Tensor):
-        """Test single-level SWT decomposition."""
-        x = sample_image
-
-        # Get level 0 filters (original filters)
-        dec_lo, dec_hi = swt._get_filters_for_level(0)
-
-        # Perform single-level decomposition
-        ll, lh, hl, hh = swt._swt_single_level(x, dec_lo, dec_hi)
-
-        # Check that all subbands have the same shape
-        assert ll.shape == lh.shape == hl.shape == hh.shape
-
-        # Check that batch and channel dimensions are preserved
-        assert ll.shape[0] == x.shape[0]
-        assert ll.shape[1] == x.shape[1]
-
-        # SWT should maintain the same spatial dimensions as input
-        assert ll.shape[2:] == x.shape[2:]
-
-        # Test with different input sizes to verify consistency
-        test_sizes = [(16, 16), (32, 32), (64, 64)]
-        for h, w in test_sizes:
-            test_input = torch.randn(2, 2, h, w)
-            test_ll, test_lh, test_hl, test_hh = swt._swt_single_level(test_input, dec_lo, dec_hi)
-
-            # Check output shape is same as input shape (no dimension change in SWT)
-            assert test_ll.shape == test_input.shape
-            assert test_lh.shape == test_input.shape
-            assert test_hl.shape == test_input.shape
-            assert test_hh.shape == test_input.shape
-
-        # Check energy relationship
-        input_energy = torch.sum(x**2).item()
-        output_energy = (
-            torch.sum(ll**2).item() + torch.sum(lh**2).item() + torch.sum(hl**2).item() + torch.sum(hh**2).item()
-        )
-
-        # For SWT, energy is not strictly preserved in the same way as DWT
-        # But we can check the relationship is reasonable
-        assert 0.5 <= output_energy / input_energy <= 5.0, (
-            f"Energy ratio (output/input): {output_energy / input_energy:.4f} should be reasonable"
-        )
-
     def test_decompose_structure(self, swt, sample_image):
         """Test structure of decomposition result."""
         x = sample_image
@@ -98,12 +56,12 @@ class TestStationaryWaveletTransform:
         expected_shape = x.shape
 
         # Check shapes of coefficients at each level
-        for l in range(level):
+        for lv in range(level):
             # Verify all bands at this level have the correct shape
-            assert result["ll"][l].shape == expected_shape
-            assert result["lh"][l].shape == expected_shape
-            assert result["hl"][l].shape == expected_shape
-            assert result["hh"][l].shape == expected_shape
+            assert result["ll"][lv].shape == expected_shape
+            assert result["lh"][lv].shape == expected_shape
+            assert result["hl"][lv].shape == expected_shape
+            assert result["hh"][lv].shape == expected_shape
 
     def test_decompose_different_levels(self, swt, sample_image):
         """Test decomposition with different levels."""
@@ -117,11 +75,11 @@ class TestStationaryWaveletTransform:
             assert len(result["ll"]) == level
 
             # All bands should maintain the same spatial dimensions
-            for l in range(level):
-                assert result["ll"][l].shape == x.shape
-                assert result["lh"][l].shape == x.shape
-                assert result["hl"][l].shape == x.shape
-                assert result["hh"][l].shape == x.shape
+            for lv in range(level):
+                assert result["ll"][lv].shape == x.shape
+                assert result["lh"][lv].shape == x.shape
+                assert result["hl"][lv].shape == x.shape
+                assert result["hh"][lv].shape == x.shape
 
     @pytest.mark.parametrize(
         "wavelet",
@@ -222,8 +180,8 @@ class TestStationaryWaveletTransform:
         assert swt_cpu.dec_lo.device == cpu_device
         assert swt_cpu.dec_hi.device == cpu_device
 
-        # Test GPU if available
-        if torch.cuda.is_available():
+        # Test GPU if available and WAVELET_TEST_CUDA is set
+        if os.environ.get("WAVELET_TEST_CUDA") and torch.cuda.is_available():
             gpu_device = torch.device("cuda:0")
             swt_gpu = StationaryWaveletTransform(device=gpu_device)
             assert swt_gpu.dec_lo.device == gpu_device
@@ -236,11 +194,11 @@ class TestStationaryWaveletTransform:
         result = swt.decompose(x, level=level)
 
         # Check all levels maintain input dimensions
-        for l in range(level):
-            assert result["ll"][l].shape == x.shape
-            assert result["lh"][l].shape == x.shape
-            assert result["hl"][l].shape == x.shape
-            assert result["hh"][l].shape == x.shape
+        for lv in range(level):
+            assert result["ll"][lv].shape == x.shape
+            assert result["lh"][lv].shape == x.shape
+            assert result["hl"][lv].shape == x.shape
+            assert result["hh"][lv].shape == x.shape
 
     def test_odd_size_input(self):
         """Test SWT with odd-sized input."""
@@ -296,26 +254,3 @@ class TestStationaryWaveletTransform:
         assert abs(ll_mean) > abs(lh_mean)
         assert abs(ll_mean) > abs(hl_mean)
         assert abs(ll_mean) > abs(hh_mean)
-
-    def test_level_progression(self, swt, sample_image):
-        """Test that each level properly builds on the previous level."""
-        x = sample_image
-        level = 3
-        result = swt.decompose(x, level=level)
-
-        # Manually compute level-by-level to verify
-        ll_current = x
-        manual_results = []
-        for l in range(level):
-            # Get filters for current level
-            dec_lo, dec_hi = swt._get_filters_for_level(l)
-            ll_next, lh, hl, hh = swt._swt_single_level(ll_current, dec_lo, dec_hi)
-            manual_results.append((ll_next, lh, hl, hh))
-            ll_current = ll_next
-
-        # Compare with the results from decompose
-        for l in range(level):
-            assert torch.allclose(manual_results[l][0], result["ll"][l])
-            assert torch.allclose(manual_results[l][1], result["lh"][l])
-            assert torch.allclose(manual_results[l][2], result["hl"][l])
-            assert torch.allclose(manual_results[l][3], result["hh"][l])

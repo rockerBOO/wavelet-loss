@@ -52,10 +52,10 @@ def dwt_single_level(x: Tensor, dec_lo: Tensor, dec_hi: Tensor) -> tuple[Tensor,
 class WaveletTransform:
     """
     Base class for wavelet transforms.
-    
+
     Provides common functionality for wavelet decomposition operations
     including filter initialization from PyWavelets.
-    
+
     Attributes:
         dec_lo: Low-pass decomposition filter tensor
         dec_hi: High-pass decomposition filter tensor
@@ -64,15 +64,17 @@ class WaveletTransform:
     def __init__(self, wavelet="db4", device=torch.device("cpu")):
         """
         Initialize wavelet filters from PyWavelets.
-        
+
         Args:
             wavelet: Wavelet name (e.g., 'db4', 'haar', 'sym4')
             device: Device to place tensors on
-            
+
         Raises:
             AssertionError: If PyWavelets module is not available
         """
         assert pywt.Wavelet is not None, "PyWavelets module not available. Please install `pip install PyWavelets`"
+
+        self.wavelet = wavelet
 
         # Create filters from wavelet
         wav = pywt.Wavelet(wavelet)
@@ -82,15 +84,15 @@ class WaveletTransform:
     def decompose(self, x: Tensor, level: int) -> dict[str, list[Tensor]]:
         """
         Abstract method for wavelet decomposition.
-        
+
         Args:
             x: Input tensor [B, C, H, W]
             level: Number of decomposition levels
-            
+
         Returns:
             Dictionary containing decomposition coefficients
             Format: {band: [level1, level2, ...]} where band ∈ {ll, lh, hl, hh}
-            
+
         Raises:
             NotImplementedError: Must be implemented by subclasses
         """
@@ -100,16 +102,18 @@ class WaveletTransform:
 class DiscreteWaveletTransform(WaveletTransform):
     """
     Discrete Wavelet Transform (DWT) implementation.
-    
+
     Performs standard separable 2D DWT with downsampling at each level.
     Each level reduces spatial dimensions by factor of 2.
-    
+
     Uses PyTorch convolutions for efficient GPU computation.
     """
 
     def decompose(self, x: Tensor, level=1) -> dict[str, list[Tensor]]:
         """
         Perform multi-level DWT decomposition.
+
+        Delegates to CustomDWTBackend (mode='zero') which matches pywt.dwt2(mode='zero').
 
         Args:
             x: Input tensor [B, C, H, W]
@@ -119,37 +123,21 @@ class DiscreteWaveletTransform(WaveletTransform):
             Dictionary containing decomposition coefficients
             Format: {band: [level1, level2, ...]} where:
             - 'll': Low-low (approximation) coefficients
-            - 'lh': Low-high (horizontal detail) coefficients  
+            - 'lh': Low-high (horizontal detail) coefficients
             - 'hl': High-low (vertical detail) coefficients
             - 'hh': High-high (diagonal detail) coefficients
         """
-        bands: dict[str, list[Tensor]] = {
-            "ll": [],
-            "lh": [],
-            "hl": [],
-            "hh": [],
-        }
+        from .backends import CustomDWTBackend
 
-        # Start low frequency with input
-        ll = x
-
-        for _ in range(level):
-            ll, lh, hl, hh = self._dwt_single_level(ll)
-
-            bands["lh"].append(lh)
-            bands["hl"].append(hl)
-            bands["hh"].append(hh)
-            bands["ll"].append(ll)
-
-        return bands
+        return CustomDWTBackend(self.wavelet, mode="zero", device=x.device).decompose(x, level)
 
     def _dwt_single_level(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Perform single-level DWT decomposition.
-        
+
         Args:
             x: Input tensor [B, C, H, W]
-            
+
         Returns:
             Tuple of (ll, lh, hl, hh) decomposed tensors with half spatial dimensions
         """
@@ -157,171 +145,48 @@ class DiscreteWaveletTransform(WaveletTransform):
 
 
 class StationaryWaveletTransform(WaveletTransform):
-    """
-    Stationary Wavelet Transform (SWT) implementation.
-    
-    Also known as redundant or undecimated wavelet transform.
-    Preserves spatial dimensions at all levels by upsampling filters
-    instead of downsampling output. Provides translation invariance.
-    
-    Uses circular convolution to avoid boundary artifacts.
-    """
+    """Undecimated (à-trous) SWT, vectorized, matching pywt.swt2 (periodic boundary)."""
 
-    def __init__(self, wavelet="db4", device=torch.device("cpu")):
-        """
-        Initialize wavelet filters and store originals for upsampling.
-        
-        Args:
-            wavelet: Wavelet name (e.g., 'db4', 'haar', 'sym4')
-            device: Device to place tensors on
-        """
-        super().__init__(wavelet, device)
-
-        # Store original filters
-        self.orig_dec_lo = self.dec_lo.clone()
-        self.orig_dec_hi = self.dec_hi.clone()
-
-    def decompose(self, x: Tensor, level=1) -> dict[str, list[Tensor]]:
-        """
-        Perform multi-level SWT decomposition.
-        
-        Args:
-            x: Input tensor [B, C, H, W]
-            level: Number of decomposition levels
-            
-        Returns:
-            Dictionary containing decomposition coefficients
-            All coefficients preserve original spatial dimensions [B, C, H, W]
-        """
-        bands = {
-            "ll": [],
-            "lh": [],
-            "hl": [],
-            "hh": [],
-        }
-
-        # Start with input as low frequency
+    def decompose(self, x: Tensor, level: int = 1) -> dict[str, list[Tensor]]:
+        bands: dict[str, list[Tensor]] = {"ll": [], "lh": [], "hl": [], "hh": []}
+        lo0 = self.dec_lo.to(device=x.device, dtype=x.dtype).flip(0)
+        hi0 = self.dec_hi.to(device=x.device, dtype=x.dtype).flip(0)
+        k0 = lo0.numel()
+        b, c, h, w = x.shape
         ll = x
-
         for j in range(level):
-            # Get upsampled filters for current level
-            dec_lo, dec_hi = self._get_filters_for_level(j)
-
-            # Decompose current approximation
-            ll, lh, hl, hh = self._swt_single_level(ll, dec_lo, dec_hi)
-
-            # Store results in bands
+            lof = self._upsample(lo0, 2**j)
+            hif = self._upsample(hi0, 2**j)
+            k = lof.numel()
+            # Roll to center the à-trous filter: use ORIGINAL filter length k0, scaled by 2**j (NOT the upsampled length).
+            shift = -(k0 // 2) * (2**j)
+            xbc = ll.reshape(b * c, 1, h, w)
+            lo_r = self._cdim(xbc, lof, 2, k, shift)
+            hi_r = self._cdim(xbc, hif, 2, k, shift)
+            ll = self._cdim(lo_r, lof, 3, k, shift).reshape(b, c, h, w)
+            lh = self._cdim(hi_r, lof, 3, k, shift).reshape(b, c, h, w)
+            hl = self._cdim(lo_r, hif, 3, k, shift).reshape(b, c, h, w)
+            hh = self._cdim(hi_r, hif, 3, k, shift).reshape(b, c, h, w)
             bands["ll"].append(ll)
             bands["lh"].append(lh)
             bands["hl"].append(hl)
             bands["hh"].append(hh)
-
-            # No need to update ll explicitly as it's already the next approximation
-
         return bands
 
-    def _get_filters_for_level(self, level: int) -> tuple[Tensor, Tensor]:
-        """
-        Get upsampled filters for the specified decomposition level.
-        
-        Args:
-            level: Decomposition level (0-indexed)
-            
-        Returns:
-            Tuple of (upsampled_dec_lo, upsampled_dec_hi) filters
-            
-        Notes:
-            - Level 0 returns original filters
-            - Higher levels insert 2^level - 1 zeros between coefficients
-        """
-        if level == 0:
-            return self.orig_dec_lo, self.orig_dec_hi
+    @staticmethod
+    def _upsample(f: Tensor, up: int) -> Tensor:
+        if up == 1:
+            return f
+        out = torch.zeros((f.numel() - 1) * up + 1, dtype=f.dtype, device=f.device)
+        out[::up] = f
+        return out
 
-        # Calculate number of zeros to insert
-        zeros = 2**level - 1
-
-        # Create upsampled filters
-        upsampled_dec_lo = torch.zeros(
-            len(self.orig_dec_lo) + (len(self.orig_dec_lo) - 1) * zeros,
-            device=self.orig_dec_lo.device,
-        )
-        upsampled_dec_hi = torch.zeros(
-            len(self.orig_dec_hi) + (len(self.orig_dec_hi) - 1) * zeros,
-            device=self.orig_dec_hi.device,
-        )
-
-        # Insert original coefficients with zeros in between
-        upsampled_dec_lo[:: zeros + 1] = self.orig_dec_lo
-        upsampled_dec_hi[:: zeros + 1] = self.orig_dec_hi
-
-        return upsampled_dec_lo, upsampled_dec_hi
-
-    def _swt_single_level(self, x: Tensor, dec_lo: Tensor, dec_hi: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """
-        Perform single-level SWT decomposition with 1D convolutions.
-        
-        Args:
-            x: Input tensor [B, C, H, W]
-            dec_lo: Low-pass decomposition filter (upsampled)
-            dec_hi: High-pass decomposition filter (upsampled)
-            
-        Returns:
-            Tuple of (ll, lh, hl, hh) decomposed tensors preserving input dimensions
-            
-        Notes:
-            - Uses separable 1D convolutions for efficiency
-            - Applies circular padding to avoid boundary artifacts
-            - Processes each batch/channel combination separately
-        """
-        batch, channels, height, width = x.shape
-
-        # Prepare output tensors
-        ll = torch.zeros((batch, channels, height, width), device=x.device)
-        lh = torch.zeros((batch, channels, height, width), device=x.device)
-        hl = torch.zeros((batch, channels, height, width), device=x.device)
-        hh = torch.zeros((batch, channels, height, width), device=x.device)
-
-        # Prepare 1D filter kernels
-        dec_lo_1d = dec_lo.view(1, 1, -1)
-        dec_hi_1d = dec_hi.view(1, 1, -1)
-        pad_len = dec_lo.size(0) - 1
-
-        for b in range(batch):
-            for c in range(channels):
-                # Extract single channel/batch and reshape for 1D convolution
-                x_bc = x[b, c]  # Shape: [height, width]
-
-                # Process rows with 1D convolution
-                # Reshape to [width, 1, height] for treating each row as a batch
-                x_rows = x_bc.transpose(0, 1).unsqueeze(1)  # Shape: [width, 1, height]
-
-                # Pad for circular convolution
-                x_rows_padded = F.pad(x_rows, (pad_len, 0), mode="circular")
-
-                # Apply filters to rows
-                x_lo_rows = F.conv1d(x_rows_padded, dec_lo_1d)  # [width, 1, height]
-                x_hi_rows = F.conv1d(x_rows_padded, dec_hi_1d)  # [width, 1, height]
-
-                # Reshape and transpose back
-                x_lo_rows = x_lo_rows.squeeze(1).transpose(0, 1)  # [height, width]
-                x_hi_rows = x_hi_rows.squeeze(1).transpose(0, 1)  # [height, width]
-
-                # Process columns with 1D convolution
-                # Reshape for column filtering (no transpose needed)
-                x_lo_cols = x_lo_rows.unsqueeze(1)  # [height, 1, width]
-                x_hi_cols = x_hi_rows.unsqueeze(1)  # [height, 1, width]
-
-                # Pad for circular convolution
-                x_lo_cols_padded = F.pad(x_lo_cols, (pad_len, 0), mode="circular")
-                x_hi_cols_padded = F.pad(x_hi_cols, (pad_len, 0), mode="circular")
-
-                # Apply filters to columns
-                ll[b, c] = F.conv1d(x_lo_cols_padded, dec_lo_1d).squeeze(1)  # [height, width]
-                lh[b, c] = F.conv1d(x_lo_cols_padded, dec_hi_1d).squeeze(1)  # [height, width]
-                hl[b, c] = F.conv1d(x_hi_cols_padded, dec_lo_1d).squeeze(1)  # [height, width]
-                hh[b, c] = F.conv1d(x_hi_cols_padded, dec_hi_1d).squeeze(1)  # [height, width]
-
-        return ll, lh, hl, hh
+    @staticmethod
+    def _cdim(t: Tensor, f: Tensor, dim: int, k: int, shift: int) -> Tensor:
+        pad = (0, 0, k - 1, 0) if dim == 2 else (k - 1, 0, 0, 0)
+        tp = F.pad(t, pad, mode="circular")
+        weight = f.view(1, 1, -1, 1) if dim == 2 else f.view(1, 1, 1, -1)
+        return torch.roll(F.conv2d(tp, weight), shift, dims=dim)
 
 
 class QuaternionWaveletTransform(WaveletTransform):
@@ -333,7 +198,7 @@ class QuaternionWaveletTransform(WaveletTransform):
     def __init__(self, wavelet="db4", device=torch.device("cpu")):
         """
         Initialize wavelet filters and Hilbert transforms.
-        
+
         Args:
             wavelet: Wavelet name (e.g., 'db4', 'haar', 'sym4')
             device: Device to place tensors on
@@ -346,10 +211,10 @@ class QuaternionWaveletTransform(WaveletTransform):
     def register_hilbert_filters(self, device):
         """
         Create and register Hilbert transform filters for quaternion components.
-        
+
         Args:
             device: Device to place filter tensors on
-            
+
         Notes:
             - Creates filters for x, y, and xy (diagonal) directions
             - Filters are approximations suitable for image processing
@@ -366,16 +231,16 @@ class QuaternionWaveletTransform(WaveletTransform):
     def _create_hilbert_filter(self, direction):
         """
         Create a Hilbert transform filter for the specified direction.
-        
+
         Args:
             direction: Filter direction ('x', 'y', or 'xy')
-            
+
         Returns:
             2D convolution filter tensor [1, 1, H, W]
-            
+
         Notes:
             - 'x': Horizontal Hilbert transform (anti-symmetric along x-axis)
-            - 'y': Vertical Hilbert transform (anti-symmetric along y-axis) 
+            - 'y': Vertical Hilbert transform (anti-symmetric along y-axis)
             - 'xy': Diagonal Hilbert transform (point reflection symmetry)
             - Filters use approximations suitable for discrete images
         """
@@ -422,14 +287,14 @@ class QuaternionWaveletTransform(WaveletTransform):
     def _apply_hilbert(self, x, direction):
         """
         Apply Hilbert transform in specified direction with correct padding.
-        
+
         Args:
             x: Input tensor [B, C, H, W]
             direction: Transform direction ('x', 'y', or 'xy')
-            
+
         Returns:
             Hilbert-transformed tensor with same dimensions as input
-            
+
         Notes:
             - Uses reflective padding to minimize boundary artifacts
             - Automatically handles even/odd filter sizes
@@ -530,7 +395,7 @@ class QuaternionWaveletTransform(WaveletTransform):
             Dictionary containing quaternion wavelet coefficients
             Format: {component: {band: [level1, level2, ...]}}
             where component ∈ {r, i, j, k} and band ∈ {ll, lh, hl, hh}
-            
+
         Notes:
             - Real component (r) uses standard DWT of input
             - Imaginary components (i, j, k) use DWT of Hilbert transforms
@@ -554,10 +419,10 @@ class QuaternionWaveletTransform(WaveletTransform):
     def _dwt_single_level(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Perform single-level DWT decomposition for quaternion component.
-        
+
         Args:
             x: Input tensor [B, C, H, W]
-            
+
         Returns:
             Tuple of (ll, lh, hl, hh) decomposed tensors with half spatial dimensions
         """

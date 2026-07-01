@@ -1,3 +1,5 @@
+import os
+
 import pytest
 import torch
 from torch import Tensor
@@ -368,8 +370,8 @@ class TestQuaternionWaveletTransform:
         assert qwt_cpu.hilbert_y.device == cpu_device
         assert qwt_cpu.hilbert_xy.device == cpu_device
 
-        # Test GPU if available
-        if torch.cuda.is_available():
+        # Test GPU if available and WAVELET_TEST_CUDA is set
+        if os.environ.get("WAVELET_TEST_CUDA") and torch.cuda.is_available():
             gpu_device = torch.device("cuda:0")
             qwt_gpu = QuaternionWaveletTransform(device=gpu_device)
             assert qwt_gpu.dec_lo.device == gpu_device

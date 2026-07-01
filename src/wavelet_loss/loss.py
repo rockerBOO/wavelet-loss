@@ -9,11 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from wavelet_transform import (
-    DiscreteWaveletTransform,
-    StationaryWaveletTransform,
-    QuaternionWaveletTransform,
-)
+from wavelet_transform import QuaternionWaveletTransform
 
 
 class LossCallableMSE(Protocol):
@@ -43,6 +39,8 @@ class WaveletLoss(nn.Module):
         wavelet="db4",
         level=3,
         transform_type="dwt",
+        backend: str = "pytorch_wavelets",
+        mode: str = "zero",
         loss_fn: LossCallable = F.mse_loss,
         device=torch.device("cpu"),
         band_level_weights: dict[str, float] | None = None,
@@ -50,11 +48,10 @@ class WaveletLoss(nn.Module):
         quaternion_component_weights: dict[str, float] | None = None,
         ll_level_threshold: int | None = -1,
         metrics: bool = False,
-        energy_ratio: float = 0.0,
-        energy_scale_factor: float = 0.01,
-        normalize_bands: bool = True,
-        max_timestep: float = 1000,
-        timestep_intensity: float = 0.5,
+        normalize_bands: bool = False,
+        max_timestep: float = 1.0,
+        timestep_cutoff: float = 0.7,
+        timestep_transition_width: float = 0.4,
     ):
         """
 
@@ -68,6 +65,15 @@ class WaveletLoss(nn.Module):
             band_weights: Optional custom weights for different bands
             component_weights: Weights for quaternion components
             ll_level_threshold: Level when applying loss for ll. Default -1 or last level.
+            max_timestep: Maximum value of the trainer's timestep convention.
+                Default 1.0 (flow-matching sigmas, e.g. Flux2). Pass 1000 for
+                DDPM-style integer timesteps. Timesteps outside
+                [0, max_timestep] raise ValueError.
+            timestep_cutoff: Fraction of max_timestep at which the timestep
+                weight crosses 0.5. Below the cutoff (less noise) the weight
+                is ~1; above it the weight fades toward 0.
+            timestep_transition_width: Fraction of the timestep range the
+                fade is spread over. Smaller = harder cutoff.
         """
         super().__init__()
         self.level = level
@@ -75,36 +81,30 @@ class WaveletLoss(nn.Module):
         self.transform_type = transform_type
         self.loss_fn = loss_fn
         self.device = device
-        self.ll_level_threshold: int | None = ll_level_threshold if ll_level_threshold is not None else None
+        self.ll_level_threshold: int | None = ll_level_threshold
         self.metrics = metrics
-        self.energy_ratio = energy_ratio
-        self.energy_scale_factor = energy_scale_factor
         self.max_timestep = max_timestep
-        self.timestep_intensity = timestep_intensity
+        self.timestep_cutoff = timestep_cutoff
+        self.timestep_transition_width = timestep_transition_width
         self.normalize_bands = normalize_bands
 
-        # Initialize transform based on type
-        if transform_type == "dwt":
-            self.transform = DiscreteWaveletTransform(wavelet, device)
-        elif transform_type == "swt":  # swt
-            self.transform = StationaryWaveletTransform(wavelet, device)
-        elif transform_type == "qwt":
-            self.transform = QuaternionWaveletTransform(wavelet, device)
+        # Initialize transform via backend factory
+        from wavelet_transform import make_backend
 
-            # Register Hilbert filters as buffers
+        self.backend = backend
+        self.mode = mode
+        self.transform = make_backend(backend, transform_type, wavelet, mode, device)
+
+        if transform_type == "qwt":
             self.register_buffer("hilbert_x", self.transform.hilbert_x)
             self.register_buffer("hilbert_y", self.transform.hilbert_y)
             self.register_buffer("hilbert_xy", self.transform.hilbert_xy)
-
-            # Default weights
             self.component_weights = quaternion_component_weights or {
-                "r": 1.0,  # Real part (standard wavelet)
-                "i": 0.7,  # x-Hilbert (imaginary part)
-                "j": 0.7,  # y-Hilbert (imaginary part)
-                "k": 0.5,  # xy-Hilbert (imaginary part)
+                "r": 1.0,
+                "i": 0.7,
+                "j": 0.7,
+                "k": 0.5,
             }
-        else:
-            raise RuntimeError(f"Invalid transform type {transform_type}")
 
         # Register wavelet filters as module buffers
         self.register_buffer("dec_lo", self.transform.dec_lo.to(device))
@@ -125,16 +125,26 @@ class WaveletLoss(nn.Module):
         pred_latent: Tensor,
         target_latent: Tensor,
         timestep: torch.Tensor | None = None,
-    ) -> tuple[list[Tensor], Mapping[str, int | float | None]]:
+        reduce: bool = True,
+    ) -> tuple[Tensor | list[Tensor], Mapping[str, int | float | None]]:
         """
         Calculate wavelet loss between prediction and target.
 
         Returns:
-            loss: Total wavelet loss
+            loss: Total wavelet loss (scalar if reduce=True, list of tensors if reduce=False)
             metrics: Wavelet metrics if requested in WaveletLoss(metrics=True)
         """
+        if pred_latent.ndim != 4 or target_latent.ndim != 4:
+            raise ValueError(
+                f"WaveletLoss expects 4D [B, C, H, W] tensors, got "
+                f"pred.ndim={pred_latent.ndim}, target.ndim={target_latent.ndim}."
+            )
+
+        if timestep is not None:
+            self._validate_timestep(timestep)
+
         if isinstance(self.transform, QuaternionWaveletTransform):
-            return self.quaternion_forward(pred_latent, target_latent, timestep)
+            return self.quaternion_forward(pred_latent, target_latent, timestep, reduce)
 
         batch_size = pred_latent.shape[0]
         device = pred_latent.device
@@ -150,7 +160,8 @@ class WaveletLoss(nn.Module):
         base_weight = torch.ones((batch_size), device=device)
         if timestep is not None:
             base_weight *= self.smooth_timestep_weight(timestep)
-            metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
+            if self.metrics:
+                metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
 
         for i in range(self.level):
             # High frequency bands
@@ -162,28 +173,18 @@ class WaveletLoss(nn.Module):
 
                 pattern_losses.append(band_loss)
 
-        # TODO: need to update this to work with a list of losses
-        # If we are balancing the energy loss with the pattern loss
-        # if self.energy_ratio > 0.0:
-        #     energy_loss = self.energy_matching_loss(batch_size, pred_coeffs, target_coeffs, device)
-        #
-        #     loss = self.energy_ratio * (self.energy_scale_factor * energy_loss)
-        #     losses: list[Tensor] = []
-        #
-        #     for pattern_loss in pattern_losses:
-        #         losses.append((1 - self.energy_ratio) * (self.energy_scale_factor * pattern_loss))
-        # else:
-        #     energy_loss = None
-        energy_loss = None
         losses = pattern_losses
 
         # METRICS: Calculate all additional metrics (no gradients needed)
         if self.metrics:
             with torch.no_grad():
                 metrics.update(self.process_coeff_metrics(pred_coeffs, target_coeffs))
-                metrics.update(self.process_loss_metrics(pattern_losses, losses, energy_loss))
+                metrics.update(self.process_loss_metrics(pattern_losses))
                 metrics.update(self.process_latent_metrics(pred_latent))
 
+        if reduce:
+            total = sum(loss_item.mean() for loss_item in losses)
+            return total, metrics
         return losses, metrics
 
     def process_coeff_metrics(
@@ -192,45 +193,43 @@ class WaveletLoss(nn.Module):
         target_coeffs: dict[str, list[Tensor]],
     ) -> Metrics:
         metrics: Metrics = {}
-        # # Raw energy metrics
-        # for band in ["lh", "hl", "hh"]:
-        #     for i in range(1, self.level + 1):
-        #         pred_stack = pred_coeffs[band][i - 1]
-        #         target_stack = target_coeffs[band][i - 1]
-        #
-        #         metrics[f"{band}{i}_raw_pred_energy"] = torch.mean(pred_stack**2).item()
-        #         metrics[f"{band}{i}_raw_target_energy"] = torch.mean(target_stack**2).item()
-        #         metrics[f"{band}{i}_energy_ratio"] = (
-        #             torch.mean(pred_stack**2) / (torch.mean(target_stack**2) + 1e-8)
-        #         ).item()
-
         metrics.update(self.calculate_correlation_metrics(pred_coeffs, target_coeffs))
-        metrics.update(self.calculate_avg_high_frequency(pred_coeffs, target_coeffs))
+        metrics.update(self.calculate_energy_metrics(pred_coeffs, target_coeffs))
         metrics.update(self.calculate_cross_scale_consistency_metrics(pred_coeffs, target_coeffs))
         metrics.update(self.calculate_directional_consistency_metrics(pred_coeffs, target_coeffs))
-        metrics.update(self.calculate_sparsity_metrics(pred_coeffs, target_coeffs))
 
         return metrics
 
-    def calculate_avg_high_frequency(
-        self, pred_coeffs: dict[str, list[Tensor]], target_coeffs: dict[str, list[Tensor]]
+    @torch.no_grad()
+    def calculate_energy_metrics(
+        self,
+        pred_coeffs: dict[str, list[Tensor]],
+        target_coeffs: dict[str, list[Tensor]],
     ) -> Metrics:
+        """Per-band coefficient energy (mean of squares) for pred and target.
+
+        Energy is non-negative and amplitude-sensitive, so it surfaces the
+        scale/amplitude errors that correlation and ratio metrics are blind to
+        (e.g. a uniformly scaled prediction). Replaces the old signed-mean
+        ``avg_hf_*`` metrics, which hovered near zero by construction.
+        """
         metrics: Metrics = {}
-        combined_hf_pred = []
-        combined_hf_target = []
+        hf_pred: list[float] = []
+        hf_target: list[float] = []
 
-        for band in ["lh", "hl", "hh"]:
+        for band in ["ll", "lh", "hl", "hh"]:
             for i in range(self.level):
-                combined_hf_pred.append(pred_coeffs[band][i])
-                combined_hf_target.append(target_coeffs[band][i])
-        combined_hf_pred = self._pad_tensors(combined_hf_pred)
-        combined_hf_target = self._pad_tensors(combined_hf_target)
+                pred_e = torch.mean(pred_coeffs[band][i] ** 2).item()
+                target_e = torch.mean(target_coeffs[band][i] ** 2).item()
+                metrics[f"wavelet_loss/energy/{band}{i + 1}_pred"] = pred_e
+                metrics[f"wavelet_loss/energy/{band}{i + 1}_target"] = target_e
+                if band != "ll":
+                    hf_pred.append(pred_e)
+                    hf_target.append(target_e)
 
-        combined_hf_pred = torch.cat(combined_hf_pred, dim=1)
-        combined_hf_target = torch.cat(combined_hf_target, dim=1)
-
-        metrics["avg_hf_pred"] = combined_hf_pred.detach().mean().item()
-        metrics["avg_hf_target"] = combined_hf_target.detach().mean().item()
+        if hf_pred:
+            metrics["wavelet_loss/avg_hf_energy_pred"] = sum(hf_pred) / len(hf_pred)
+            metrics["wavelet_loss/avg_hf_energy_target"] = sum(hf_target) / len(hf_target)
 
         return metrics
 
@@ -250,35 +249,16 @@ class WaveletLoss(nn.Module):
 
         return metrics
 
-    def process_loss_metrics(
-        self,
-        pattern_losses: list[Tensor],
-        losses: list[Tensor],
-        energy_loss: Tensor | None,
-    ):
+    def process_loss_metrics(self, losses: list[Tensor]) -> Metrics:
+        """Aggregate the weighted per-band losses into a scalar total metric.
+
+        ``losses`` are the weighted per-band loss tensors — the same ones summed
+        for the ``reduce=True`` return — so this mirrors the optimized objective
+        exactly. Per-band breakdowns are emitted by ``process_band``.
         """
-        Process loss metrics
-
-        Args:
-            metrics: The metrics dictionary
-            pattern_losses: The pattern losses
-            losses: The total losses
-            energy_loss: The energy loss
-
-        Returns:
-            metrics: The updated metrics dictionary
-        """
-        metrics: dict[str, int | float | None] = {}
-        # Add loss components to metrics
-        for i, pattern_loss in enumerate(pattern_losses):
-            metrics[f"pattern_loss-{i + 1}"] = pattern_loss.detach().mean().item()
-
-        for i, total_loss in enumerate(losses):
-            metrics[f"total_loss-{i + 1}"] = total_loss.detach().mean().item()
-
-        if energy_loss is not None:
-            metrics["energy_loss"] = energy_loss.detach().mean().item()
-
+        metrics: Metrics = {}
+        total = sum(loss_item.detach().mean() for loss_item in losses)
+        metrics["wavelet_loss/total"] = float(total)
         return metrics
 
     def process_band(
@@ -322,22 +302,30 @@ class WaveletLoss(nn.Module):
         target = target_coeffs[band][i]
 
         if self.normalize_bands:
-            # Normalize wavelet components
-            pred = (pred - pred.mean()) / (pred.std() + 1e-8)
-            target = (target - target.mean()) / (target.std() + 1e-8)
+            # Shared normalization: use the TARGET band statistics for BOTH tensors
+            # so relative amplitude/offset errors are preserved (not zeroed out).
+            mean = target.mean()
+            std = target.std() + 1e-8
+            pred = (pred - mean) / std
+            target = (target - mean) / std
 
         band_loss = self.loss_fn(pred, target, reduction="none")
 
         weight = base_weight * self.band_level_weights.get(weight_key, self.band_weights[band])
         loss = weight.view(-1, 1, 1, 1) * band_loss
 
-        metrics: Metrics = {f"{band}{i}_band_loss": band_loss.detach().mean().item()}
+        metrics: Metrics = {}
+        if self.metrics:
+            metrics = {
+                f"wavelet_loss/band_loss/{band}{i + 1}": band_loss.detach().mean().item(),
+                f"wavelet_loss/weighted_band_loss/{band}{i + 1}": loss.detach().mean().item(),
+            }
 
         return loss, pred, target, metrics
 
     def quaternion_forward(
-        self, pred: Tensor, target: Tensor, timestep: Tensor | None
-    ) -> tuple[list[Tensor], Mapping[str, int | float | None]]:
+        self, pred: Tensor, target: Tensor, timestep: Tensor | None, reduce: bool = True
+    ) -> tuple[Tensor | list[Tensor], Mapping[str, int | float | None]]:
         """
         Calculate QWT loss between prediction and target.
 
@@ -370,7 +358,8 @@ class WaveletLoss(nn.Module):
         base_weight = torch.ones((batch_size), device=device)
         if timestep is not None:
             base_weight *= self.smooth_timestep_weight(timestep)
-            metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
+            if self.metrics:
+                metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
 
         # Calculate loss for each quaternion component, band and level
 
@@ -382,7 +371,8 @@ class WaveletLoss(nn.Module):
                         pred_qwt[component], target_qwt[component], band, level_idx, base_weight=base_weight
                     )
                     component_losses[f"{component}_{band}_{level_idx + 1}"] = band_loss
-                    metrics[f"{component}_{band}_{level_idx + 1}"] = band_loss.detach().mean().item()
+                    if self.metrics:
+                        metrics[f"{component}_{band}_{level_idx + 1}"] = band_loss.detach().mean().item()
                     metrics.update(band_metrics)
 
                     pattern_losses.append(component_weight * band_loss)
@@ -394,93 +384,13 @@ class WaveletLoss(nn.Module):
 
         # METRICS: Calculate all additional metrics
         if self.metrics:
-            metrics.update(self.process_loss_metrics(pattern_losses, pattern_losses, energy_loss=None))
+            metrics.update(self.process_loss_metrics(pattern_losses))
             metrics.update(self.process_latent_metrics(pred))
 
+        if reduce:
+            total = sum(loss_item.mean() for loss_item in pattern_losses)
+            return total, metrics
         return pattern_losses, metrics
-
-    def _pad_tensors(self, tensors: list[Tensor]) -> list[Tensor]:
-        """Pad tensors to match the largest size."""
-        # Find max dimensions
-        max_h = max(t.shape[2] for t in tensors)
-        max_w = max(t.shape[3] for t in tensors)
-
-        padded_tensors = []
-        for tensor in tensors:
-            h_pad = max_h - tensor.shape[2]
-            w_pad = max_w - tensor.shape[3]
-
-            if h_pad > 0 or w_pad > 0:
-                # Pad bottom and right to match max dimensions
-                padded = F.pad(tensor, (0, w_pad, 0, h_pad))
-                padded_tensors.append(padded)
-            else:
-                padded_tensors.append(tensor)
-
-        return padded_tensors
-
-    @torch.no_grad()
-    def energy_matching_loss(
-        self,
-        batch_size: int,
-        pred_coeffs: dict[str, list[Tensor]],
-        target_coeffs: dict[str, list[Tensor]],
-        device: torch.device,
-    ) -> Tensor:
-        """
-        Calculate energy matching loss between predicted and target wavelet coefficients.
-        
-        Args:
-            batch_size: Size of the batch
-            pred_coeffs: Dictionary of predicted wavelet coefficients
-            target_coeffs: Dictionary of target wavelet coefficients  
-            device: Device to create tensors on
-            
-        Returns:
-            Energy matching loss tensor
-            
-        Notes:
-            - Uses log-scale energy ratio for stability
-            - Applies band-specific and level-specific weights
-            - Only considers high-frequency bands (lh, hl, hh)
-        """
-        energy_loss = torch.zeros(batch_size, device=device)
-        for band in ["lh", "hl", "hh"]:
-            for i in range(1, self.level + 1):
-                weight_key = f"{band}{i}"
-                # Calculate band energies
-                pred_energy = torch.mean(pred_coeffs[band][i - 1] ** 2)
-                target_energy = torch.mean(target_coeffs[band][i - 1] ** 2)
-
-                # Log-scale energy ratio loss (more stable than direct ratio)
-                ratio_loss = torch.abs(torch.log(pred_energy + 1e-8) - torch.log(target_energy + 1e-8))
-
-                weight = self.band_level_weights.get(weight_key, self.band_weights[band])
-                energy_loss += weight * ratio_loss
-
-        return energy_loss
-
-    @torch.no_grad()
-    def calculate_raw_energy_metrics(self, pred_stack: Tensor, target_stack: Tensor, band: str, level: int):
-        """
-        Calculate raw energy metrics for a specific band and level.
-        
-        Args:
-            pred_stack: Predicted wavelet coefficients tensor
-            target_stack: Target wavelet coefficients tensor
-            band: Wavelet band name (e.g., "lh", "hl", "hh")
-            level: Wavelet decomposition level
-            
-        Returns:
-            Dictionary containing raw energy metrics for the band/level
-        """
-        metrics: dict[str, float | int] = {}
-        metrics[f"{band}{level}_raw_pred_energy"] = torch.mean(pred_stack**2).detach().item()
-        metrics[f"{band}{level}_raw_target_energy"] = torch.mean(target_stack**2).detach().item()
-
-        metrics[f"{band}{level}_raw_error"] = self.loss_fn(pred_stack.float(), target_stack.float()).detach().item()
-
-        return metrics
 
     @torch.no_grad()
     def calculate_cross_scale_consistency_metrics(
@@ -490,14 +400,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate metrics for cross-scale consistency between adjacent wavelet levels.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing cross-scale consistency metrics
-            
+
         Notes:
             - Compares energy ratios between adjacent scales
             - Uses log-scale differences for stability
@@ -519,15 +429,14 @@ class WaveletLoss(nn.Module):
                 log_ratio_diff = abs(math.log(pred_ratio + 1e-8) - math.log(target_ratio + 1e-8))
 
                 # Store individual metrics
-                metrics[f"{band}{i}_to_{i + 1}_pred_scale_ratio"] = pred_ratio
-                metrics[f"{band}{i}_to_{i + 1}_target_scale_ratio"] = target_ratio
-                metrics[f"{band}{i}_to_{i + 1}_scale_log_diff"] = log_ratio_diff
+                metrics[f"wavelet_loss/cross_scale/{band}{i}_to_{i + 1}_pred_ratio"] = pred_ratio
+                metrics[f"wavelet_loss/cross_scale/{band}{i}_to_{i + 1}_target_ratio"] = target_ratio
+                metrics[f"wavelet_loss/cross_scale/{band}{i}_to_{i + 1}_log_diff"] = log_ratio_diff
 
         # Calculate average difference across all bands and scales
-        if metrics:  # Check if dictionary is not empty
-            metrics["avg_cross_scale_difference"] = sum(
-                v for k, v in metrics.items() if k.endswith("scale_log_diff")
-            ) / len([k for k in metrics if k.endswith("scale_log_diff")])
+        log_diffs = [v for k, v in metrics.items() if k.endswith("_log_diff")]
+        if log_diffs:
+            metrics["wavelet_loss/cross_scale/avg_difference"] = sum(log_diffs) / len(log_diffs)
 
         return metrics
 
@@ -539,14 +448,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate spatial correlation metrics between predicted and target wavelet coefficients.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing correlation metrics for each band and level
-            
+
         Notes:
             - Calculates correlation across spatial dimensions
             - Provides per-level and per-band averaged correlations
@@ -574,10 +483,10 @@ class WaveletLoss(nn.Module):
                 correlation = numerator / denom  # [B, C]
                 avg_corr = correlation.mean().item()
 
-                metrics[f"{band}{i + 1}_spatial_correlation"] = avg_corr
+                metrics[f"wavelet_loss/correlation/{band}{i + 1}"] = avg_corr
                 band_correlations.append(avg_corr)
 
-            metrics[f"{band}_avg_correlation"] = np.mean(band_correlations)
+            metrics[f"wavelet_loss/correlation/{band}_avg"] = np.mean(band_correlations)
 
         return metrics
 
@@ -589,14 +498,14 @@ class WaveletLoss(nn.Module):
     ) -> dict:
         """
         Calculate metrics for directional consistency between wavelet bands.
-        
+
         Args:
             pred_coeffs: Dictionary of predicted wavelet coefficients
             target_coeffs: Dictionary of target wavelet coefficients
-            
+
         Returns:
             Dictionary containing directional consistency metrics
-            
+
         Notes:
             - Analyzes horizontal vs vertical energy ratios (hl/lh)
             - Analyzes diagonal vs horizontal+vertical energy ratios (hh/(hl+lh))
@@ -627,22 +536,22 @@ class WaveletLoss(nn.Module):
             diag_log_diff = abs(math.log(pred_d_ratio + 1e-8) - math.log(target_d_ratio + 1e-8))
 
             # Store metrics
-            metrics[f"level{i}_horiz_vert_pred_ratio"] = pred_hv_ratio
-            metrics[f"level{i}_horiz_vert_target_ratio"] = target_hv_ratio
-            metrics[f"level{i}_horiz_vert_log_diff"] = hv_log_diff
+            metrics[f"wavelet_loss/directional/level{i}_hv_pred_ratio"] = pred_hv_ratio
+            metrics[f"wavelet_loss/directional/level{i}_hv_target_ratio"] = target_hv_ratio
+            metrics[f"wavelet_loss/directional/level{i}_hv_log_diff"] = hv_log_diff
 
-            metrics[f"level{i}_diag_ratio_pred"] = pred_d_ratio
-            metrics[f"level{i}_diag_ratio_target"] = target_d_ratio
-            metrics[f"level{i}_diag_ratio_log_diff"] = diag_log_diff
+            metrics[f"wavelet_loss/directional/level{i}_diag_pred_ratio"] = pred_d_ratio
+            metrics[f"wavelet_loss/directional/level{i}_diag_target_ratio"] = target_d_ratio
+            metrics[f"wavelet_loss/directional/level{i}_diag_log_diff"] = diag_log_diff
 
             hv_diffs.append(hv_log_diff)
             diag_diffs.append(diag_log_diff)
 
         # Average metrics
         if hv_diffs:
-            metrics["avg_horiz_vert_diff"] = sum(hv_diffs) / len(hv_diffs)
+            metrics["wavelet_loss/directional/avg_hv_diff"] = sum(hv_diffs) / len(hv_diffs)
         if diag_diffs:
-            metrics["avg_diag_ratio_diff"] = sum(diag_diffs) / len(diag_diffs)
+            metrics["wavelet_loss/directional/avg_diag_diff"] = sum(diag_diffs) / len(diag_diffs)
 
         return metrics
 
@@ -650,13 +559,13 @@ class WaveletLoss(nn.Module):
     def calculate_latent_regularity_metrics(self, pred_latents: Tensor) -> dict:
         """
         Calculate metrics for latent space regularity and smoothness.
-        
+
         Args:
             pred_latents: Predicted latent tensor
-            
+
         Returns:
             Dictionary containing latent regularity metrics
-            
+
         Notes:
             - Calculates total variation (TV) for smoothness measurement
             - Provides statistical metrics (mean, std)
@@ -679,97 +588,59 @@ class WaveletLoss(nn.Module):
         std_diff = abs(std_value - 1.0)
 
         # Store metrics
-        metrics["latent_tv_x"] = tv_x
-        metrics["latent_tv_y"] = tv_y
-        metrics["latent_tv_total"] = tv_total
-        metrics["latent_std"] = std_value
-        metrics["latent_mean"] = mean_value
-        metrics["latent_std_from_normal"] = std_diff
-
-        return metrics
-
-    @torch.no_grad()
-    def calculate_sparsity_metrics(
-        self,
-        coeffs: dict[str, list[Tensor]],
-        reference_coeffs: dict[str, list[Tensor]] | None = None,
-    ) -> dict:
-        """
-        Calculate sparsity metrics for wavelet coefficients.
-        
-        Args:
-            coeffs: Dictionary of wavelet coefficients
-            reference_coeffs: Optional reference coefficients for relative sparsity
-            
-        Returns:
-            Dictionary containing sparsity metrics
-            
-        Notes:
-            - Uses L1 norm as primary sparsity measure
-            - Calculates non-zero ratio (threshold at 0.01)
-            - Provides relative sparsity if reference coefficients given
-            - Computes average sparsity score across all bands
-        """
-        metrics = {}
-        band_sparsities = []
-        band_non_zero_ratios = []
-
-        for band in ["lh", "hl", "hh"]:
-            for i in range(1, self.level + 1):
-                coef = coeffs[band][i - 1]
-
-                # L1 norm (sparsity measure)
-                l1_norm = torch.mean(torch.abs(coef)).item()
-                metrics[f"{band}{i}_l1_norm"] = l1_norm
-                band_sparsities.append(l1_norm)
-
-                # Additional sparsity metrics
-                non_zero_ratio = torch.mean((torch.abs(coef) > 0.01).float()).item()
-                metrics[f"{band}{i}_non_zero_ratio"] = non_zero_ratio
-                band_non_zero_ratios.append(non_zero_ratio)
-
-                # If reference coefficients provided, calculate relative sparsity
-                if reference_coeffs is not None:
-                    ref_coef = reference_coeffs[band][i - 1]
-                    ref_l1_norm = torch.mean(torch.abs(ref_coef)).item()
-                    rel_sparsity = l1_norm / (ref_l1_norm + 1e-8)
-                    metrics[f"{band}{i}_relative_sparsity"] = rel_sparsity
-
-        # Average sparsity across bands
-        if band_sparsities:
-            metrics["avg_sparsity_score"] = 1.0 / (sum(band_sparsities) / len(band_sparsities) + 1e-8)
+        metrics["wavelet_loss/latent/tv_x"] = tv_x
+        metrics["wavelet_loss/latent/tv_y"] = tv_y
+        metrics["wavelet_loss/latent/tv_total"] = tv_total
+        metrics["wavelet_loss/latent/std"] = std_value
+        metrics["wavelet_loss/latent/mean"] = mean_value
+        metrics["wavelet_loss/latent/std_from_normal"] = std_diff
 
         return metrics
 
     def smooth_timestep_weight(self, timestep):
         """
-        Calculate smooth timestep-based weight using sigmoid transition.
-        
+        Timestep-dependent loss weight with a smooth sigmoid fade.
+
+        The weight is ~1 for timesteps below ``timestep_cutoff * max_timestep``
+        (low noise, where high-frequency wavelet detail is meaningful) and
+        fades to ~0 as the timestep approaches ``max_timestep`` (pure noise).
+
         Args:
-            timestep: Current diffusion timestep tensor
-            
+            timestep: Current diffusion timestep tensor, in [0, max_timestep].
+
         Returns:
-            Smooth weight tensor with sigmoid transition instead of hard cutoff
-            
-        Notes:
-            - Weight decreases as timestep increases (later in denoising process)
-            - Uses sigmoid for smooth transition around progress=0.3
-            - Higher weights early in denoising, lower weights near completion
+            Weight tensor in (0, 1), same shape as ``timestep``.
         """
-        progress = 1.0 - (timestep / self.max_timestep)
-        weight = torch.sigmoid((progress - 0.3) * 10)
-        return weight
+        t_frac = timestep / self.max_timestep
+        return torch.sigmoid((self.timestep_cutoff - t_frac) * 4.0 / self.timestep_transition_width)
+
+    def _validate_timestep(self, timestep: Tensor) -> None:
+        """Raise ValueError for timesteps outside [0, max_timestep].
+
+        Strict by design: a mismatched timestep scale (e.g. DDPM-style 0-1000
+        timesteps against the flow-matching default max_timestep=1.0) must
+        fail loudly rather than silently saturate the weight. Costs one
+        host-device sync when a timestep is provided.
+        """
+        invalid = (timestep < 0) | (timestep > self.max_timestep)
+        if bool(invalid.any()):
+            raise ValueError(
+                f"timestep values must lie in [0, max_timestep={self.max_timestep}], "
+                f"got [{timestep.min().item()}, {timestep.max().item()}]. "
+                "For DDPM-style integer timesteps pass WaveletLoss(..., max_timestep=1000); "
+                "flow-matching sigmas in [0, 1] work with the default max_timestep=1.0."
+            )
 
     def _calculate_effective_ll_threshold(self) -> int | None:
         """
         Calculate the effective LL level threshold.
-        
+
         For positive values, returns the value as-is.
         For negative values, calculates from the end: level + threshold
-        
+
         Returns:
             Effective threshold level, or None if no threshold is set
-            
+
         Examples:
             level=3, threshold=1  -> 1
             level=3, threshold=2  -> 2
@@ -778,7 +649,7 @@ class WaveletLoss(nn.Module):
         """
         if self.ll_level_threshold is None:
             return None
-            
+
         if self.ll_level_threshold > 0:
             return self.ll_level_threshold
         else:
