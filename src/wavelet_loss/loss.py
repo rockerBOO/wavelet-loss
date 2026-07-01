@@ -49,7 +49,9 @@ class WaveletLoss(nn.Module):
         ll_level_threshold: int | None = -1,
         metrics: bool = False,
         normalize_bands: bool = False,
-        max_timestep: float = 1000,
+        max_timestep: float = 1.0,
+        timestep_cutoff: float = 0.7,
+        timestep_transition_width: float = 0.4,
     ):
         """
 
@@ -63,6 +65,15 @@ class WaveletLoss(nn.Module):
             band_weights: Optional custom weights for different bands
             component_weights: Weights for quaternion components
             ll_level_threshold: Level when applying loss for ll. Default -1 or last level.
+            max_timestep: Maximum value of the trainer's timestep convention.
+                Default 1.0 (flow-matching sigmas, e.g. Flux2). Pass 1000 for
+                DDPM-style integer timesteps. Timesteps outside
+                [0, max_timestep] raise ValueError.
+            timestep_cutoff: Fraction of max_timestep at which the timestep
+                weight crosses 0.5. Below the cutoff (less noise) the weight
+                is ~1; above it the weight fades toward 0.
+            timestep_transition_width: Fraction of the timestep range the
+                fade is spread over. Smaller = harder cutoff.
         """
         super().__init__()
         self.level = level
@@ -73,6 +84,8 @@ class WaveletLoss(nn.Module):
         self.ll_level_threshold: int | None = ll_level_threshold
         self.metrics = metrics
         self.max_timestep = max_timestep
+        self.timestep_cutoff = timestep_cutoff
+        self.timestep_transition_width = timestep_transition_width
         self.normalize_bands = normalize_bands
 
         # Initialize transform via backend factory
@@ -126,6 +139,9 @@ class WaveletLoss(nn.Module):
                 f"WaveletLoss expects 4D [B, C, H, W] tensors, got "
                 f"pred.ndim={pred_latent.ndim}, target.ndim={target_latent.ndim}."
             )
+
+        if timestep is not None:
+            self._validate_timestep(timestep)
 
         if isinstance(self.transform, QuaternionWaveletTransform):
             return self.quaternion_forward(pred_latent, target_latent, timestep, reduce)
@@ -578,22 +594,37 @@ class WaveletLoss(nn.Module):
 
     def smooth_timestep_weight(self, timestep):
         """
-        Calculate smooth timestep-based weight using sigmoid transition.
+        Timestep-dependent loss weight with a smooth sigmoid fade.
+
+        The weight is ~1 for timesteps below ``timestep_cutoff * max_timestep``
+        (low noise, where high-frequency wavelet detail is meaningful) and
+        fades to ~0 as the timestep approaches ``max_timestep`` (pure noise).
 
         Args:
-            timestep: Current diffusion timestep tensor
+            timestep: Current diffusion timestep tensor, in [0, max_timestep].
 
         Returns:
-            Smooth weight tensor with sigmoid transition instead of hard cutoff
-
-        Notes:
-            - Weight decreases as timestep increases (later in denoising process)
-            - Uses sigmoid for smooth transition around progress=0.3
-            - Higher weights early in denoising, lower weights near completion
+            Weight tensor in (0, 1), same shape as ``timestep``.
         """
-        progress = 1.0 - (timestep / self.max_timestep)
-        weight = torch.sigmoid((progress - 0.3) * 10)
-        return weight
+        t_frac = timestep / self.max_timestep
+        return torch.sigmoid((self.timestep_cutoff - t_frac) * 4.0 / self.timestep_transition_width)
+
+    def _validate_timestep(self, timestep: Tensor) -> None:
+        """Raise ValueError for timesteps outside [0, max_timestep].
+
+        Strict by design: a mismatched timestep scale (e.g. DDPM-style 0-1000
+        timesteps against the flow-matching default max_timestep=1.0) must
+        fail loudly rather than silently saturate the weight. Costs one
+        host-device sync when a timestep is provided.
+        """
+        invalid = (timestep < 0) | (timestep > self.max_timestep)
+        if bool(invalid.any()):
+            raise ValueError(
+                f"timestep values must lie in [0, max_timestep={self.max_timestep}], "
+                f"got [{timestep.min().item()}, {timestep.max().item()}]. "
+                "For DDPM-style integer timesteps pass WaveletLoss(..., max_timestep=1000); "
+                "flow-matching sigmas in [0, 1] work with the default max_timestep=1.0."
+            )
 
     def _calculate_effective_ll_threshold(self) -> int | None:
         """
