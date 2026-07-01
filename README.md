@@ -5,6 +5,12 @@ A Python library for wavelet-based loss calculations in machine learning.
 ## Installation
 
 ```bash
+pip install wavelet-loss
+```
+
+Or install the latest development version from git:
+
+```bash
 pip install git+https://github.com/rockerBOO/wavelet-loss.git
 ```
 
