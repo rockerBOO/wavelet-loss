@@ -60,6 +60,7 @@ class TestWaveletLoss:
             transform_type="dwt",
             device=device,
             max_timestep=1000,
+            metrics=True,
         )
 
         # Test different timestep scenarios
@@ -113,6 +114,7 @@ class TestWaveletLoss:
                 transform_type="qwt",
                 device=device,
                 quaternion_component_weights=weights,
+                metrics=True,
             )
 
             # Perform forward pass
@@ -349,5 +351,6 @@ class TestWaveletLoss:
                     assert effective_threshold == threshold, "Positive threshold should be unchanged"
                 else:
                     assert effective_threshold == level + threshold, "Negative threshold should be calculated from end"
+
 
 # Remaining previous tests...

@@ -160,7 +160,8 @@ class WaveletLoss(nn.Module):
         base_weight = torch.ones((batch_size), device=device)
         if timestep is not None:
             base_weight *= self.smooth_timestep_weight(timestep)
-            metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
+            if self.metrics:
+                metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
 
         for i in range(self.level):
             # High frequency bands
@@ -313,10 +314,12 @@ class WaveletLoss(nn.Module):
         weight = base_weight * self.band_level_weights.get(weight_key, self.band_weights[band])
         loss = weight.view(-1, 1, 1, 1) * band_loss
 
-        metrics: Metrics = {
-            f"wavelet_loss/band_loss/{band}{i + 1}": band_loss.detach().mean().item(),
-            f"wavelet_loss/weighted_band_loss/{band}{i + 1}": loss.detach().mean().item(),
-        }
+        metrics: Metrics = {}
+        if self.metrics:
+            metrics = {
+                f"wavelet_loss/band_loss/{band}{i + 1}": band_loss.detach().mean().item(),
+                f"wavelet_loss/weighted_band_loss/{band}{i + 1}": loss.detach().mean().item(),
+            }
 
         return loss, pred, target, metrics
 
@@ -355,7 +358,8 @@ class WaveletLoss(nn.Module):
         base_weight = torch.ones((batch_size), device=device)
         if timestep is not None:
             base_weight *= self.smooth_timestep_weight(timestep)
-            metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
+            if self.metrics:
+                metrics["wavelet_loss/avg_timestep_adjusted_weight"] = base_weight.detach().mean().item()
 
         # Calculate loss for each quaternion component, band and level
 
@@ -367,7 +371,8 @@ class WaveletLoss(nn.Module):
                         pred_qwt[component], target_qwt[component], band, level_idx, base_weight=base_weight
                     )
                     component_losses[f"{component}_{band}_{level_idx + 1}"] = band_loss
-                    metrics[f"{component}_{band}_{level_idx + 1}"] = band_loss.detach().mean().item()
+                    if self.metrics:
+                        metrics[f"{component}_{band}_{level_idx + 1}"] = band_loss.detach().mean().item()
                     metrics.update(band_metrics)
 
                     pattern_losses.append(component_weight * band_loss)

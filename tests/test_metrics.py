@@ -125,3 +125,39 @@ def test_latent_metrics_namespaced():
     _, metrics = lf(pred, target)
     for suffix in ["tv_x", "tv_y", "tv_total", "std", "mean", "std_from_normal"]:
         assert f"wavelet_loss/latent/{suffix}" in metrics
+
+
+def test_metrics_false_returns_empty_dict():
+    lf = _loss(metrics=False)
+    pred, target = _inputs()
+    _, metrics = lf(pred, target)
+    assert metrics == {}
+
+
+def test_metrics_false_empty_with_timestep():
+    lf = _loss(metrics=False)
+    pred, target = _inputs()
+    _, metrics = lf(pred, target, timestep=torch.tensor([0.5, 0.5]))
+    assert metrics == {}
+
+
+def test_metrics_false_qwt_returns_empty_dict():
+    lf = WaveletLoss(wavelet="db2", level=1, transform_type="qwt", metrics=False)
+    pred, target = _inputs()
+    _, metrics = lf(pred, target)
+    assert metrics == {}
+
+
+def test_metrics_true_includes_timestep_weight():
+    lf = _loss(metrics=True)
+    pred, target = _inputs()
+    _, metrics = lf(pred, target, timestep=torch.tensor([0.5, 0.5]))
+    assert "wavelet_loss/avg_timestep_adjusted_weight" in metrics
+
+
+def test_metrics_true_includes_band_losses():
+    lf = _loss(metrics=True)
+    pred, target = _inputs()
+    _, metrics = lf(pred, target)
+    assert "wavelet_loss/band_loss/lh1" in metrics
+    assert "wavelet_loss/weighted_band_loss/lh1" in metrics
