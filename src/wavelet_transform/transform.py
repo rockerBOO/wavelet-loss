@@ -34,10 +34,10 @@ def dwt_single_level(x: Tensor, dec_lo: Tensor, dec_hi: Tensor) -> tuple[Tensor,
     lo = F.conv2d(x_pad, dec_lo.view(1, 1, -1, 1), stride=(2, 1))
     hi = F.conv2d(x_pad, dec_hi.view(1, 1, -1, 1), stride=(2, 1))
 
-    # Apply filter to columns
+    # Apply filter to columns (pywt convention: lh = hi on H / lo on W, hl = lo on H / hi on W)
     ll = F.conv2d(lo, dec_lo.view(1, 1, 1, -1), stride=(1, 2))
-    lh = F.conv2d(lo, dec_hi.view(1, 1, 1, -1), stride=(1, 2))
-    hl = F.conv2d(hi, dec_lo.view(1, 1, 1, -1), stride=(1, 2))
+    lh = F.conv2d(hi, dec_lo.view(1, 1, 1, -1), stride=(1, 2))
+    hl = F.conv2d(lo, dec_hi.view(1, 1, 1, -1), stride=(1, 2))
     hh = F.conv2d(hi, dec_hi.view(1, 1, 1, -1), stride=(1, 2))
 
     # Reshape back to batch format
@@ -122,10 +122,10 @@ class DiscreteWaveletTransform(WaveletTransform):
         Returns:
             Dictionary containing decomposition coefficients
             Format: {band: [level1, level2, ...]} where:
-            - 'll': Low-low (approximation) coefficients
-            - 'lh': Low-high (horizontal detail) coefficients
-            - 'hl': High-low (vertical detail) coefficients
-            - 'hh': High-high (diagonal detail) coefficients
+            - 'll': Approximation coefficients (pywt cA)
+            - 'lh': Horizontal detail, high-pass on H / low-pass on W (pywt cH)
+            - 'hl': Vertical detail, low-pass on H / high-pass on W (pywt cV)
+            - 'hh': Diagonal detail, high-pass on both (pywt cD)
         """
         from .backends import CustomDWTBackend
 
