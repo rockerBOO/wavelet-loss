@@ -7,6 +7,7 @@ import torch
 
 from wavelet_transform import DiscreteWaveletTransform
 from wavelet_transform import WaveletTransform
+from wavelet_transform.transform import dwt_single_level
 
 
 def _rel(a, b):
@@ -216,6 +217,29 @@ class TestDiscreteWaveletTransform:
             dwt_gpu = DiscreteWaveletTransform(device=gpu_device)
             assert dwt_gpu.dec_lo.device == gpu_device
             assert dwt_gpu.dec_hi.device == gpu_device
+
+    def test_legacy_helper_band_convention(self, dwt: DiscreteWaveletTransform):
+        """dwt_single_level must follow the pywt convention: lh = high-pass on H, hl = high-pass on W.
+
+        An input that varies only along H (constant along W) has no W-direction
+        detail, so its detail energy must land in lh, and hl must be ~0.
+        """
+        torch.manual_seed(4)
+        # Varies along H only: each row is a constant
+        row_signal = torch.randn(32, 1)
+        x_h = row_signal.expand(32, 32).reshape(1, 1, 32, 32).contiguous()
+
+        _, lh, hl, _ = dwt_single_level(x_h, dwt.dec_lo, dwt.dec_hi)
+        assert lh.abs().max() > 1e-2, "lh must carry H-direction detail (high-pass on H)"
+        assert hl.abs().max() < 1e-4, "hl must be ~0 for a signal constant along W"
+
+        # Symmetric check: varies along W only
+        col_signal = torch.randn(1, 32)
+        x_w = col_signal.expand(32, 32).reshape(1, 1, 32, 32).contiguous()
+
+        _, lh, hl, _ = dwt_single_level(x_w, dwt.dec_lo, dwt.dec_hi)
+        assert hl.abs().max() > 1e-2, "hl must carry W-direction detail (high-pass on W)"
+        assert lh.abs().max() < 1e-4, "lh must be ~0 for a signal constant along H"
 
     def test_base_class_abstract_method(self):
         """Test that base class requires implementation of decompose."""
