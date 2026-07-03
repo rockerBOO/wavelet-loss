@@ -298,6 +298,21 @@ class WaveletLoss(nn.Module):
             )
 
         weight_key = f"{band}{i + 1}"
+
+        # A statically zero-weighted band contributes nothing to loss or
+        # gradients -- skip the band loss (and its autograd graph) entirely,
+        # like the ll_level_threshold branch above. Note: skipped bands emit
+        # no band_loss metrics; use a tiny non-zero weight to monitor a band
+        # without training on it.
+        static_weight = self.band_level_weights.get(weight_key, self.band_weights[band])
+        if static_weight == 0:
+            return (
+                torch.zeros_like(pred_coeffs[band][i]),
+                torch.zeros_like(pred_coeffs[band][i]),
+                torch.zeros_like(target_coeffs[band][i]),
+                {},
+            )
+
         pred = pred_coeffs[band][i]
         target = target_coeffs[band][i]
 
@@ -311,7 +326,7 @@ class WaveletLoss(nn.Module):
 
         band_loss = self.loss_fn(pred, target, reduction="none")
 
-        weight = base_weight * self.band_level_weights.get(weight_key, self.band_weights[band])
+        weight = base_weight * static_weight
         loss = weight.view(-1, 1, 1, 1) * band_loss
 
         metrics: Metrics = {}
