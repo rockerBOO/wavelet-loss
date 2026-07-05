@@ -2,14 +2,14 @@
 
 musubi-tuner resolves ``--loss_fn wavelet_loss.musubi.WaveletPlusMSE`` via a
 dotted import and instantiates the class with the parsed ``--loss_fn_args``
-key=value pairs. The instance is called with the exact signature of
-``NetworkTrainer.compute_loss`` (minus ``self``) and returns
-``(scalar_loss, metrics_dict)``.
+key=value pairs. The instance is called with a single ``LossContext`` (``ctx.args``,
+``ctx.output``, ``ctx.timesteps``, ``ctx.noise_scheduler``, ``ctx.dit_dtype``,
+``ctx.network_dtype``, ``ctx.global_step``) and returns ``(scalar_loss, metrics_dict)``.
 
 Example::
 
     --loss_fn wavelet_loss.musubi.WaveletPlusMSE \
-    --loss_fn_args alpha=1.0 transform_type=swt wavelet=sym7 level=2
+    --loss_fn_args alpha=1.0 "transform_type='swt'" "wavelet='sym7'" level=2
 
 This module imports musubi_tuner and is only importable inside a
 musubi-tuner environment.
@@ -62,20 +62,12 @@ class WaveletPlusMSE(torch.nn.Module):
 
         self.wavelet = WaveletLoss(loss_fn=_band_loss, **wavelet_kwargs)
 
-    def forward(
-        self,
-        args,
-        output,
-        timesteps: torch.Tensor,
-        noise_scheduler,
-        dit_dtype: torch.dtype,
-        network_dtype: torch.dtype,
-        global_step: int,
-    ) -> tuple[torch.Tensor, dict[str, float]]:
+    def forward(self, ctx) -> tuple[torch.Tensor, dict[str, float]]:
+        args, output, timesteps = ctx.args, ctx.output, ctx.timesteps
         weighting = compute_loss_weighting_for_sd3(
-            args.weighting_scheme, noise_scheduler, timesteps, timesteps.device, dit_dtype
+            args.weighting_scheme, ctx.noise_scheduler, timesteps, timesteps.device, ctx.dit_dtype
         )
-        mse = F.mse_loss(output.pred.to(network_dtype), output.target, reduction="none")
+        mse = F.mse_loss(output.pred.to(ctx.network_dtype), output.target, reduction="none")
         if weighting is not None:
             mse = mse * weighting
         mse = mse.mean()
