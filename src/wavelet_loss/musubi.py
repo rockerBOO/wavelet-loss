@@ -85,6 +85,13 @@ class WaveletPlusMSE(torch.nn.Module):
             wav_pred = output.pred
             wav_target = output.target
 
+        if wav_pred.ndim == 5:
+            # single-frame video-style latents (B, C, 1, H, W), e.g. Krea2
+            if wav_pred.shape[2] != 1:
+                raise ValueError(f"WaveletPlusMSE only supports single-frame 5D latents, got shape {tuple(wav_pred.shape)}")
+            wav_pred = wav_pred.squeeze(2)
+            wav_target = wav_target.squeeze(2)
+
         wav_loss, wav_metrics = self.wavelet(wav_pred.float(), wav_target.float(), timesteps)
 
         metrics = dict(wav_metrics)
