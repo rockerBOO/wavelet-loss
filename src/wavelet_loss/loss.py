@@ -31,6 +31,56 @@ LossCallable = LossCallableReduction | LossCallableMSE
 Metrics = dict[str, int | float | None]
 
 
+def snr_aware_huber_loss(
+    pred: Tensor,
+    target: Tensor,
+    timestep: Tensor,
+    max_timestep: float,
+    cmin: float = 0.2,
+    cmax: float = 1.0,
+    gamma: float = 5.0,
+    alpha: float = 0.5,
+    min_snr_beta: float = 0.0,
+) -> Tensor:
+    """SNR-aware adaptive-threshold pseudo-Huber loss (UltraFlux paper).
+
+    The pseudo-Huber threshold ``c_t`` adapts per-sample from the flow-matching
+    SNR at ``timestep``: small (robust to outliers) at high noise, large
+    (sensitive, ~L2-like) at low noise. Ported from rockerBOO/sd-scripts#1991.
+
+    Args:
+        pred: Prediction tensor, batch-first, any trailing shape.
+        target: Target tensor, same shape as ``pred``.
+        timestep: Per-sample timestep ``[B]`` in ``[0, max_timestep]``.
+        max_timestep: Trainer's timestep convention ceiling (e.g. 1.0 for
+            flow-matching sigmas, 1000 for DDPM-style integer timesteps).
+        cmin: Minimum Huber threshold (robust at high noise).
+        cmax: Maximum Huber threshold (sensitive at low noise).
+        gamma: SNR clamp ceiling used to normalize the threshold interpolant.
+        alpha: Threshold transition smoothness exponent.
+        min_snr_beta: Optional Min-SNR reweighting exponent; ``0.0`` disables it.
+
+    Returns:
+        Unreduced per-element loss tensor, same shape as ``pred``.
+    """
+    t_frac = timestep / max_timestep
+    snr = ((1 - t_frac) ** 2) / (t_frac**2 + 1e-8)
+    snr_clamped = torch.clamp(snr, max=gamma)
+
+    c_t = cmin + (cmax - cmin) * (snr_clamped / gamma) ** alpha
+    view_shape = (-1,) + (1,) * (pred.ndim - 1)
+    c_t = c_t.view(view_shape)
+
+    diff = pred - target
+    huber = c_t**2 * (torch.sqrt(1 + (diff / c_t) ** 2) - 1)
+
+    if min_snr_beta > 0:
+        weight = (t_frac / (1 - t_frac + 1e-8)) * (snr_clamped**min_snr_beta)
+        huber = huber * weight.view(view_shape)
+
+    return huber
+
+
 class WaveletLoss(nn.Module):
     """Wavelet-based loss calculation module."""
 
@@ -52,6 +102,12 @@ class WaveletLoss(nn.Module):
         max_timestep: float = 1.0,
         timestep_cutoff: float = 0.7,
         timestep_transition_width: float = 0.4,
+        use_snr_aware_huber: bool = False,
+        snr_huber_cmin: float = 0.2,
+        snr_huber_cmax: float = 1.0,
+        snr_huber_gamma: float = 5.0,
+        snr_huber_alpha: float = 0.5,
+        min_snr_beta: float = 0.0,
     ):
         """
 
@@ -74,6 +130,16 @@ class WaveletLoss(nn.Module):
                 is ~1; above it the weight fades toward 0.
             timestep_transition_width: Fraction of the timestep range the
                 fade is spread over. Smaller = harder cutoff.
+            use_snr_aware_huber: Replace ``loss_fn`` with the SNR-aware
+                adaptive-threshold pseudo-Huber loss for band residuals.
+                Requires ``timestep`` at call time. Stacks with the
+                ``timestep_cutoff`` fade above (both apply).
+            snr_huber_cmin: Minimum Huber threshold (robust at high noise).
+            snr_huber_cmax: Maximum Huber threshold (sensitive at low noise).
+            snr_huber_gamma: SNR clamp ceiling for the threshold interpolant.
+            snr_huber_alpha: Threshold transition smoothness exponent.
+            min_snr_beta: Optional Min-SNR reweighting exponent for the
+                SNR-aware Huber loss; ``0.0`` disables it.
         """
         super().__init__()
         self.level = level
@@ -87,6 +153,12 @@ class WaveletLoss(nn.Module):
         self.timestep_cutoff = timestep_cutoff
         self.timestep_transition_width = timestep_transition_width
         self.normalize_bands = normalize_bands
+        self.use_snr_aware_huber = use_snr_aware_huber
+        self.snr_huber_cmin = snr_huber_cmin
+        self.snr_huber_cmax = snr_huber_cmax
+        self.snr_huber_gamma = snr_huber_gamma
+        self.snr_huber_alpha = snr_huber_alpha
+        self.min_snr_beta = min_snr_beta
 
         # Initialize transform via backend factory
         from wavelet_transform import make_backend
@@ -142,6 +214,8 @@ class WaveletLoss(nn.Module):
 
         if timestep is not None:
             self._validate_timestep(timestep)
+        elif self.use_snr_aware_huber:
+            raise ValueError("timestep is required when use_snr_aware_huber=True")
 
         if isinstance(self.transform, QuaternionWaveletTransform):
             return self.quaternion_forward(pred_latent, target_latent, timestep, reduce)
@@ -167,7 +241,7 @@ class WaveletLoss(nn.Module):
             # High frequency bands
             for band in ["ll", "lh", "hl", "hh"]:
                 band_loss, pred, target, band_metrics = self.process_band(
-                    pred_coeffs, target_coeffs, band, i, base_weight=base_weight
+                    pred_coeffs, target_coeffs, band, i, base_weight=base_weight, timestep=timestep
                 )
                 metrics.update(band_metrics)
 
@@ -268,6 +342,7 @@ class WaveletLoss(nn.Module):
         band: str,
         i: int,
         base_weight: Tensor,
+        timestep: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Metrics]:
         """
         Process a single band and calculate the loss.
@@ -278,6 +353,8 @@ class WaveletLoss(nn.Module):
             band: The band to process (e.g. "lh", "hl", etc.)
             i: The level index
             base_weight: The base weight for the band
+            timestep: Per-sample timestep, required when
+                ``use_snr_aware_huber=True``
 
         Returns:
             loss: The band loss
@@ -324,7 +401,22 @@ class WaveletLoss(nn.Module):
             pred = (pred - mean) / std
             target = (target - mean) / std
 
-        band_loss = self.loss_fn(pred, target, reduction="none")
+        if self.use_snr_aware_huber:
+            if timestep is None:
+                raise ValueError("timestep is required when use_snr_aware_huber=True")
+            band_loss = snr_aware_huber_loss(
+                pred,
+                target,
+                timestep,
+                self.max_timestep,
+                cmin=self.snr_huber_cmin,
+                cmax=self.snr_huber_cmax,
+                gamma=self.snr_huber_gamma,
+                alpha=self.snr_huber_alpha,
+                min_snr_beta=self.min_snr_beta,
+            )
+        else:
+            band_loss = self.loss_fn(pred, target, reduction="none")
 
         weight = base_weight * static_weight
         loss = weight.view(-1, 1, 1, 1) * band_loss
@@ -383,7 +475,7 @@ class WaveletLoss(nn.Module):
             for band in ["ll", "lh", "hl", "hh"]:
                 for level_idx in range(self.level):
                     band_loss, pred_coeffs, target_coeffs, band_metrics = self.process_band(
-                        pred_qwt[component], target_qwt[component], band, level_idx, base_weight=base_weight
+                        pred_qwt[component], target_qwt[component], band, level_idx, base_weight=base_weight, timestep=timestep
                     )
                     component_losses[f"{component}_{band}_{level_idx + 1}"] = band_loss
                     if self.metrics:
