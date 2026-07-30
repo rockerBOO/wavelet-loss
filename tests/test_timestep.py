@@ -68,6 +68,22 @@ def test_forward_accepts_boundary_timesteps():
     assert torch.isfinite(loss)
 
 
+def test_forward_tolerates_tiny_overshoot_past_max():
+    """Float rounding from upstream sampling (e.g. 1000.09 vs max_timestep=1000)
+    must not crash training; it's clamped instead of raised."""
+    lf = _loss(max_timestep=1000)
+    pred, target = _inputs()
+    loss, _ = lf(pred, target, timestep=torch.tensor([907.9, 1000.09]))
+    assert torch.isfinite(loss)
+
+
+def test_forward_still_raises_on_large_overshoot():
+    lf = _loss(max_timestep=1000)
+    pred, target = _inputs()
+    with pytest.raises(ValueError, match="max_timestep"):
+        lf(pred, target, timestep=torch.tensor([500.0, 1050.0]))
+
+
 def test_qwt_forward_validates_timestep():
     lf = WaveletLoss(wavelet="db2", level=1, transform_type="qwt")
     pred, target = _inputs()

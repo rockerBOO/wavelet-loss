@@ -214,6 +214,7 @@ class WaveletLoss(nn.Module):
 
         if timestep is not None:
             self._validate_timestep(timestep)
+            timestep = timestep.clamp(0, self.max_timestep)
         elif self.use_snr_aware_huber:
             raise ValueError("timestep is required when use_snr_aware_huber=True")
 
@@ -722,14 +723,22 @@ class WaveletLoss(nn.Module):
         return torch.sigmoid((self.timestep_cutoff - t_frac) * 4.0 / self.timestep_transition_width)
 
     def _validate_timestep(self, timestep: Tensor) -> None:
-        """Raise ValueError for timesteps outside [0, max_timestep].
+        """Raise ValueError for timesteps outside [0, max_timestep] (with tolerance).
 
         Strict by design: a mismatched timestep scale (e.g. DDPM-style 0-1000
         timesteps against the flow-matching default max_timestep=1.0) must
         fail loudly rather than silently saturate the weight. Costs one
         host-device sync when a timestep is provided.
+
+        A small relative tolerance (0.1% of max_timestep) absorbs float
+        rounding from upstream timestep sampling (e.g. self-distillation
+        schedulers computing a "next" timestep that lands a hair past the
+        terminal value) without masking genuine scale mismatches, which are
+        off by orders of magnitude. Values within tolerance are clamped by
+        the caller, not left overshooting.
         """
-        invalid = (timestep < 0) | (timestep > self.max_timestep)
+        tol = max(1e-3 * self.max_timestep, 1e-6)
+        invalid = (timestep < -tol) | (timestep > self.max_timestep + tol)
         if bool(invalid.any()):
             raise ValueError(
                 f"timestep values must lie in [0, max_timestep={self.max_timestep}], "
