@@ -14,6 +14,9 @@ Example::
     --loss_fn wavelet_loss.musubi.WaveletPlusSNRHuber \
     --loss_fn_args alpha=1.0 loss_type='snr_huber'
 
+    --loss_fn wavelet_loss.musubi.WaveletOnly \
+    --loss_fn_args loss_type='l1' "transform_type='swt'"
+
 This module imports musubi_tuner and is only importable inside a
 musubi-tuner environment.
 """
@@ -100,6 +103,30 @@ class _WaveletPlusBase(torch.nn.Module):
             wav_target = wav_target.squeeze(2)
 
         return self.wavelet(wav_pred.float(), wav_target.float(), timesteps)
+
+
+class WaveletOnly(_WaveletPlusBase):
+    """Pure wavelet loss -- no outer flow-matching MSE/Huber term.
+
+    Trains solely on the wavelet-band residual (``loss_type`` selects the
+    per-band penalty; see :class:`_WaveletPlusBase`). ``alpha`` still scales
+    the wavelet term so it composes with the same ``--loss_fn_args`` shape as
+    the other adapters, but defaults to ``1.0`` since there's no other term
+    to balance against.
+    """
+
+    def __init__(self, alpha: float = 1.0, rectified_flow: bool = False, loss_type: str = "l2", **wavelet_kwargs):
+        super().__init__(alpha, rectified_flow, loss_type, **wavelet_kwargs)
+
+    def forward(self, ctx) -> tuple[torch.Tensor, dict[str, float]]:
+        output, timesteps = ctx.output, ctx.timesteps
+
+        wav_loss, wav_metrics = self._wavelet_term(output, timesteps)
+
+        metrics = dict(wav_metrics)
+        metrics["loss/wavelet"] = float(wav_loss.detach())
+
+        return self.alpha * wav_loss, metrics
 
 
 class WaveletPlusMSE(_WaveletPlusBase):
