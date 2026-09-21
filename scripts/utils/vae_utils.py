@@ -15,6 +15,15 @@ except ImportError:
     VaeImageProcessor = None
     Image = None
 
+try:
+    from diffusers import AutoencoderKLQwenImage21
+except ImportError:
+    AutoencoderKLQwenImage21 = None
+
+QWEN_TEMPORAL_VAE_CLASSES = tuple(
+    cls for cls in (AutoencoderKLQwenImage, AutoencoderKLQwenImage21) if cls is not None
+)
+
 # Optional image processing libraries
 try:
     import cv2
@@ -36,7 +45,10 @@ def load_vae_model(model_name_or_path="stabilityai/sd-vae-ft-mse", subfolder=Non
         raise ImportError("diffusers library is not installed.")
 
     if "qwen" in model_name_or_path.lower():
-        vae = AutoencoderKLQwenImage.from_pretrained(model_name_or_path, subfolder=subfolder)
+        if "2.1" in model_name_or_path and AutoencoderKLQwenImage21 is not None:
+            vae = AutoencoderKLQwenImage21.from_pretrained(model_name_or_path, subfolder=subfolder)
+        else:
+            vae = AutoencoderKLQwenImage.from_pretrained(model_name_or_path, subfolder=subfolder)
         vae_scale_factor = 2 ** len(vae.temperal_downsample)
     else:
         vae = AutoencoderKL.from_pretrained(model_name_or_path, subfolder=subfolder)
@@ -85,7 +97,7 @@ def encode_image_to_latent(vae, processor, img_tensor, device):
     Returns:
         tuple: (latent, reconstructed_img, display_img)
     """
-    img_tensor = img_tensor.to(device)
+    img_tensor = img_tensor.to(device=device, dtype=next(vae.parameters()).dtype)
 
     with torch.no_grad():
         # Use diffusers VAE encode method
@@ -104,6 +116,11 @@ def encode_image_to_latent(vae, processor, img_tensor, device):
         # Process outputs using VaeImageProcessor
         reconstructed = processor.postprocess(reconstructed, output_type="pt")
         img_tensor_display = processor.postprocess(img_tensor, output_type="pt")
+
+    # Downstream wavelet transforms/matplotlib/numpy don't support bf16/fp16; use float32 for output
+    latent = latent.float()
+    reconstructed = reconstructed.float()
+    img_tensor_display = img_tensor_display.float()
 
     return latent, reconstructed, img_tensor_display
 
@@ -212,16 +229,15 @@ def preprocess_tensor(input_path, input_type, vae_model=None, subfolder=None, de
         # Preprocess with VAE processor
         img_tensor = preprocess_image_with_vae_processor(img, processor)
         
-        # Handle QwenImage specific processing
-        from diffusers.models.autoencoders import AutoencoderKLQwenImage
-        if isinstance(vae, AutoencoderKLQwenImage):
+        # Handle QwenImage specific processing (both QwenImage and QwenImage-2.1 VAEs are temporal)
+        if isinstance(vae, QWEN_TEMPORAL_VAE_CLASSES):
             img_tensor = img_tensor.unsqueeze(2)
-        
+
         # Encode to latent space
         latent, _, _ = encode_image_to_latent(vae, processor, img_tensor, device)
-        
+
         # Handle QwenImage output
-        if isinstance(vae, AutoencoderKLQwenImage):
+        if isinstance(vae, QWEN_TEMPORAL_VAE_CLASSES):
             latent = latent.squeeze(2)
         
         return latent
