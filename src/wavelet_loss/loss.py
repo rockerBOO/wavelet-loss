@@ -81,6 +81,43 @@ def snr_aware_huber_loss(
     return huber
 
 
+def x0_threshold_huber_loss(
+    pred: Tensor,
+    target: Tensor,
+    timestep: Tensor,
+    max_timestep: float,
+    c: float = 1.0,
+    t_min: float = 1e-3,
+) -> Tensor:
+    """Pseudo-Huber on a velocity residual with the threshold measured in x0 units.
+
+    In flow matching (``x0_hat = x_t - t * v_hat``) an x0 error ``e`` shows up in
+    velocity as ``e / t``. A velocity-space threshold therefore treats small
+    low-noise x0 errors (e.g. 0.3 at t=0.05 -> 6 in v) as outliers and caps the
+    gradient that should push them back. This uses the per-sample threshold
+    ``c / t`` instead, written in cancellation-free form::
+
+        rho(r) = r^2 / (sqrt(1 + (r t / c)^2) + 1),   r = pred - target
+
+    ~ r^2 / 2 while the implied x0 error ``|r t|`` is below ``c`` (at every t),
+    linear (bounded gradient) beyond it.
+
+    Args:
+        pred: Prediction tensor (velocity or its wavelet coefficients), batch-first.
+        target: Target tensor, same shape as ``pred``.
+        timestep: Per-sample timestep ``[B]`` in ``[0, max_timestep]``.
+        max_timestep: Trainer's timestep convention ceiling (1.0 or 1000).
+        c: Threshold in x0 units.
+        t_min: Floor on ``t / max_timestep`` (at t -> 0 the loss is pure L2 anyway).
+
+    Returns:
+        Unreduced per-element loss tensor, same shape as ``pred``.
+    """
+    t = (timestep / max_timestep).clamp(min=t_min).view(-1, *([1] * (pred.ndim - 1)))
+    diff = pred - target
+    return diff.pow(2) / (torch.sqrt(1 + (diff * t / c).pow(2)) + 1)
+
+
 class WaveletLoss(nn.Module):
     """Wavelet-based loss calculation module."""
 
@@ -108,6 +145,8 @@ class WaveletLoss(nn.Module):
         snr_huber_gamma: float = 5.0,
         snr_huber_alpha: float = 0.5,
         min_snr_beta: float = 0.0,
+        use_x0_huber: bool = False,
+        x0_huber_c: float = 1.0,
     ):
         """
 
@@ -140,8 +179,15 @@ class WaveletLoss(nn.Module):
             snr_huber_alpha: Threshold transition smoothness exponent.
             min_snr_beta: Optional Min-SNR reweighting exponent for the
                 SNR-aware Huber loss; ``0.0`` disables it.
+            use_x0_huber: Replace ``loss_fn`` with the x0-threshold pseudo-Huber
+                (``x0_threshold_huber_loss``) for band residuals. Requires
+                ``timestep`` at call time. Mutually exclusive with
+                ``use_snr_aware_huber``.
+            x0_huber_c: Threshold for ``use_x0_huber``, in x0 units.
         """
         super().__init__()
+        if use_snr_aware_huber and use_x0_huber:
+            raise ValueError("use_snr_aware_huber and use_x0_huber are mutually exclusive")
         self.level = level
         self.wavelet = wavelet
         self.transform_type = transform_type
@@ -159,6 +205,8 @@ class WaveletLoss(nn.Module):
         self.snr_huber_gamma = snr_huber_gamma
         self.snr_huber_alpha = snr_huber_alpha
         self.min_snr_beta = min_snr_beta
+        self.use_x0_huber = use_x0_huber
+        self.x0_huber_c = x0_huber_c
 
         # Initialize transform via backend factory
         from wavelet_transform import make_backend
@@ -217,6 +265,8 @@ class WaveletLoss(nn.Module):
             timestep = timestep.clamp(0, self.max_timestep)
         elif self.use_snr_aware_huber:
             raise ValueError("timestep is required when use_snr_aware_huber=True")
+        elif self.use_x0_huber:
+            raise ValueError("timestep is required when use_x0_huber=True")
 
         if isinstance(self.transform, QuaternionWaveletTransform):
             return self.quaternion_forward(pred_latent, target_latent, timestep, reduce)
@@ -416,6 +466,10 @@ class WaveletLoss(nn.Module):
                 alpha=self.snr_huber_alpha,
                 min_snr_beta=self.min_snr_beta,
             )
+        elif self.use_x0_huber:
+            if timestep is None:
+                raise ValueError("timestep is required when use_x0_huber=True")
+            band_loss = x0_threshold_huber_loss(pred, target, timestep, self.max_timestep, c=self.x0_huber_c)
         else:
             band_loss = self.loss_fn(pred, target, reduction="none")
 
@@ -476,7 +530,12 @@ class WaveletLoss(nn.Module):
             for band in ["ll", "lh", "hl", "hh"]:
                 for level_idx in range(self.level):
                     band_loss, pred_coeffs, target_coeffs, band_metrics = self.process_band(
-                        pred_qwt[component], target_qwt[component], band, level_idx, base_weight=base_weight, timestep=timestep
+                        pred_qwt[component],
+                        target_qwt[component],
+                        band,
+                        level_idx,
+                        base_weight=base_weight,
+                        timestep=timestep,
                     )
                     component_losses[f"{component}_{band}_{level_idx + 1}"] = band_loss
                     if self.metrics:
