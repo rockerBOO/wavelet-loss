@@ -1,4 +1,4 @@
-"""Figures for docs/mottle-x0-huber.md.
+"""Figures for docs/x0-huber.md.
 
 1. huber_thresholds.png: SNR-Huber vs x0-Huber across timesteps. Shows where each threshold sits in
    velocity units against the velocity residual a fixed x0 error produces, and how much gradient each

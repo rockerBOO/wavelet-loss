@@ -42,3 +42,4 @@ high-frequency loss at high noise levels — see
 - [Loss Configurations](configurations.md)
 - [Advanced Usage](advanced.md)
 - [PyWavelets Integration](pywavelets.md)
+- [x0-Huber and Local Energy Matching](x0-huber.md)
