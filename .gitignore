@@ -8,6 +8,7 @@ docs/superpowers/specs/
 
 *.png
 *.jpg
+!docs/images/*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
