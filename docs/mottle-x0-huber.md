@@ -245,12 +245,70 @@ loss_fn_args = [
 # training_script = src/boo_musubi_tuner/loss_context/flux_2_train_network_loss_context.py
 ```
 
+## Tuning the wavelet strength
+
+At `alpha=1.0` the wavelet term dominates the loss. That is what both x0-Huber runs used, and it shows as
+very strong edges.
+
+Logged medians (wandb), bucketed by the per-step `mottle/*` key:
+
+| run | t | main (x0-Huber) | wavelet, alpha 1.0 | wavelet / main |
+|---|---|---|---|---|
+| FLUX.2 `r7ntkvri` | 0–0.2 (n=11) | 0.47 | 2.83 | 6.0× |
+| | 0.2–0.5 | 0.30 | 1.70 | 5.8× |
+| | 0.5–1.0 | 0.21 | 0.34 | 1.8× |
+| Krea 2 `d4a05zde` | 0–0.2 (n=26) | 0.099 | 0.62 | 6.3× |
+| | 0.2–0.5 | 0.042 | 0.25 | 5.9× |
+| | 0.5–1.0 | 0.034 | 0.059 | 1.9× |
+
+- **Plain MSE for reference.** In its quadratic regime x0-Huber is ≈ `r^2 / 2`, so plain velocity MSE would
+  read about 2× the main column: ~0.42 median on FLUX.2 and ~0.07 on Krea 2. Krea 2's latents run smaller.
+- **Why the ratio is ~6.** The wavelet term is the sum of 6 per-band losses (lh/hl/hh × 2 levels) times the
+  timestep fade.
+  - The SWT keeps every band at full resolution, so each band carries roughly the whole high-frequency error.
+  - On FLUX.2 at t 0.2–0.5, each band is ≈ 0.30, the same as the main loss, and the fade is ≈ 0.95.
+  - No single band dominates.
+- **High t.** Above t 0.5 the fade is ≈ 0.28, so the term already backs off there.
+
+AdamW normalises the overall step size, so only this mix matters. Both terms are near-quadratic, so the
+loss ratio is a fair proxy for the gradient ratio.
+
+**Rule of thumb.** At t < 0.5 the main loss's residual is almost all high-frequency, so the total push on
+detail is about `(1 + 6 * alpha)` × plain MSE's. That is an estimate from the loss values, not a gradient
+measurement.
+
+| alpha | push on detail vs MSE, t < 0.5 | t > 0.5 (fade ~0.3) | wavelet share of loss, t < 0.5 |
+|---|---|---|---|
+| 1.0 | ~7× | ~2.8× | ~85% |
+| 0.3 | ~2.8× | ~1.5× | ~64% |
+| **0.2** (next run) | **~2.2×** | **~1.35×** | **~55%** |
+| 0.1 | ~1.6× | ~1.2× | ~37% |
+
+`alpha=0.2` keeps a clear effect (about 2× the detail push) while the main loss stays an equal partner. 0.1 is
+mild and nearly vanishes at high t. The mottle fix doesn't depend on alpha, because the main term is x0-Huber
+too.
+
+**Knobs, most direct first.** Change one at a time, starting with alpha.
+
+1. **`alpha`**: overall wavelet strength (table above).
+2. **Band `x0_huber_c`** (default 1.0): the targeted "less strong on edges" knob.
+   - A misplaced edge is a large x0 error; mottle is 0.03–0.3.
+   - `x0_huber_c=0.5` caps the gradient on large edge errors while a 0.3 mottle error keeps ~86% of L2 push.
+   - Don't go below ~0.3, or the bands start capping mottle again (the original SNR-Huber failure).
+   - Untested.
+3. **`band_level_weights`**: down-weight level 1, the finest scale and the crispest edges, e.g.
+   `{'lh1': 0.5, 'hl1': 0.5, 'hh1': 0.5}` with level 2 at 1.
+4. **`timestep_cutoff` / `timestep_transition_width`** (0.7 / 0.4): where the term fades out at high noise.
+   It is already weak there, so this matters least for edges.
+
 ## Next
 
-1. Offline M on fixed images, noise and t ∈ [0.05, 0.3] for the step 500/1000/1500 checkpoints of the
+1. `alpha=0.2`, everything else unchanged, as an A/B against the alpha 1.0 runs. If edges are still too
+   strong, try band `x0_huber_c=0.5`.
+2. Offline M on fixed images, noise and t ∈ [0.05, 0.3] for the step 500/1000/1500 checkpoints of the
    FLUX.2 runs. This gives a like-for-like comparison, including the control, which never logged M.
-2. "Work backwards" from x0-Huber:
+3. "Work backwards" from x0-Huber:
    - gentler scale (the `retro-anime-mottle-control` config now holds alpha 8 = x1, loraplus 4);
    - then `energy_beta` if mottle remains.
-3. Explorative Modeling doesn't compose with the wavelet adapters yet. XM calls
+4. Explorative Modeling doesn't compose with the wavelet adapters yet. XM calls
    `compute_loss(reduction="none")`, and the adapters only return a scalar.
