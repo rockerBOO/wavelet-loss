@@ -3,6 +3,30 @@
 Status as of 2026-09-28. **x0-Huber works and is the default going forward.** It was tested on FLUX.2 Klein
 and on Krea 2. Local energy matching is implemented but hasn't been trained yet.
 
+## What "x0-Huber" means
+
+**x0** is the clean latent: the image in latent space, with no noise. The model predicts a velocity
+`v_hat`, and that implies a guess of the clean latent, `x0_hat = x_t - t v_hat`. So a velocity error `r` is an
+image error `e = t r`.
+
+"x0-Huber" is a pseudo-Huber whose **threshold is measured in x0 units**. The loss is still computed on the
+velocity prediction, exactly where SNR-Huber is computed. The threshold asks "is the implied clean image off
+by more than `c`?", not "is the velocity off by more than `c`?". At low `t` those are very different questions:
+0.3 of texture error at t = 0.05 is a velocity error of 6.
+
+Substituting `e = t r` shows what it is:
+
+```
+rho = (1 / t^2) * c^2 (sqrt(1 + (e / c)^2) - 1)
+```
+
+That is an ordinary pseudo-Huber on the x0 error with threshold `c`. The `1 / t^2` weight is the same factor
+that makes L2 on x0 equal L2 on velocity, so small errors cost exactly what plain velocity L2 would. Only
+errors that are large *in the image* get the Huber cap.
+
+The name refers to where the threshold lives, not to the space the loss is computed in. In
+`WaveletPlusX0Huber` the wavelet bands are still taken on velocity (`rectified_flow=False`).
+
 ## The problem
 
 DiT LoRA training with `WaveletPlusSNRHuber` (Krea 2, FLUX.2 Klein) left low-amplitude high-frequency
