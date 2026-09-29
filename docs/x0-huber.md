@@ -90,7 +90,7 @@ loss, metrics = loss_fn(pred, target, timestep)   # timestep is required
 ```
 
 - `use_x0_huber` and `use_snr_aware_huber` are mutually exclusive.
-- `c = 1.0` is about the size of a whole latent coefficient.
+- `c` is in absolute latent units. `c = 1.0` suits FLUX.2; see [Latent scale](#latent-scale) for other VAEs.
 
 musubi-tuner (`--loss_fn`):
 
@@ -151,7 +151,7 @@ coefficient is a one-sample energy estimate, far too noisy to use on its own.
   - 9x9 smears busy energy across the edges of flat regions, hiding excess texture next to detail.
   - 5x5 (the default) separates flat and busy regions while staying stable.
 - **Scale:** on FLUX.2 one latent cell is 16x16 image pixels (VAE /8 plus 2x2 patchify), so 5x5 covers
-  80x80 px.
+  80x80 px. On Krea 2 (Qwen-Image VAE, /8) it covers 40x40 px.
 
 ### Mottle ratio M
 
@@ -221,7 +221,7 @@ At t < 0.5 the main loss's residual is almost all high-frequency, so the total p
 
 Other knobs, most direct first:
 
-1. **Band `x0_huber_c`** (default 1.0).
+1. **Band `x0_huber_c`** (default 1.0). The values here are FLUX.2-scaled; see [Latent scale](#latent-scale).
    - A misplaced edge is a large x0 error; fine texture errors are about 0.03–0.3.
    - At 0.5, large edge errors get a capped gradient while a 0.3 texture error keeps about 86% of L2 push.
    - Below about 0.3 the bands start capping texture errors, the same saturation SNR-Huber has.
@@ -229,6 +229,45 @@ Other knobs, most direct first:
    `{'lh1': 0.5, 'hl1': 0.5, 'hh1': 0.5}`.
 3. **`timestep_cutoff` / `timestep_transition_width`** (0.7 / 0.4): where the term fades out at high
    noise. It is already weak there.
+
+## Latent scale
+
+`c`, `x0_huber_c`, the energy `eps` and the texture sizes above are all in **absolute latent units**. VAEs
+differ a lot in how much high-frequency (HF) energy their latents carry, and in how many pixels a
+latent-unit error becomes.
+
+Measured on the same 8 training images, using the latents each trainer actually sees:
+
+| | FLUX.2 (128 ch, 16 px/cell) | Krea 2 / Qwen-Image VAE (16 ch, 8 px/cell) |
+|---|---|---|
+| latent std | 0.91 | 0.50 |
+| HF energy, level-1 SWT, channel-averaged | 0.40 (rms ≈ 0.63) | 0.017 (rms ≈ 0.13) |
+| HF energy, flattest 30% | 0.31 | 0.008 |
+| pixel change in flat areas per 0.1 latent noise (mean abs, 0–255) | 0.61 | 3.5 |
+| latent noise that adds ~1 gray level of flat-area HF texture | ≈ 0.3 | ≈ 0.05 |
+
+The noise rows come from decoding a latent with white noise of the given std added to every value, then
+measuring the change in the flattest 30% of pixels. The response is linear from 0.01 to 0.3.
+
+The same numeric latent error changes Krea 2 pixels about 6× more, and Krea 2's flat regions have about
+37× less HF energy to hide it in. Measured against each latent's own HF rms, the visibility threshold is
+similar: about 0.5× the HF rms on FLUX.2 and 0.4× on Krea 2.
+
+**Scale by the latent's HF rms.** Krea 2's HF rms is about 0.2× FLUX.2's, so:
+
+| | FLUX.2 | Krea 2 (≈ 0.2×) |
+|---|---|---|
+| main / band `x0_huber_c` | 1.0 | ≈ 0.2 |
+| edge-softening band `c` (see Tuning) | 0.5 | ≈ 0.1 |
+| texture errors that matter | 0.03–0.3 | ≈ 0.006–0.06 |
+| energy `eps` | 1e-3 | ≈ 1e-4 |
+
+- **With `c = 1.0` on Krea 2**, x0-Huber is effectively plain L2. It still fixes low-`t` saturation, but
+  large errors aren't capped.
+- **With `eps = 1e-3` on Krea 2**, the log floor is about 12% of the flat-region HF energy and exceeds `G S`
+  at mid `t`, so the energy term loses sensitivity where it's needed.
+- **SNR-Huber** saturates less on Krea 2 than on FLUX.2 for the same reason: its velocity threshold is fixed,
+  and Krea 2's errors are numerically smaller.
 
 ## Figures
 
